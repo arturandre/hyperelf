@@ -14,7 +14,11 @@ import numpy as np
 from timeit import default_timer as timer
 
 import logging
-logging.basicConfig(filename='exp2_cifar10.log', encoding='utf-8', level=logging.DEBUG)
+root_logger= logging.getLogger()
+root_logger.setLevel(logging.DEBUG) # or whatever
+handler = logging.FileHandler('exp2_cifar10.log', 'w', 'utf-8') # or whatever
+#handler.setFormatter(logging.Formatter('%(name)s %(message)s')) # or whatever
+root_logger.addHandler(handler)
 
 current_epoch = 0
 max_output = 1152
