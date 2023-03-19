@@ -1,2 +1,7 @@
 *.png
 *.log
+*.out
+.neptune/
+outputs/
+outs/
+__pycache__/

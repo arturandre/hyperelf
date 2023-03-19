@@ -1,0 +1,11 @@
+Input arguments: Namespace(expfolder='/scratch/arturao/hyperelf/outputs', expnames='exp032,exp033,exp034,exp035,exp036,exp037,exp038', no_cuda=False, output_path=None, seed=1)
+
+Total clean: 1440
+Num. disagreements clean: 260
+Mean disagreements clean: 0.5819444444444445
+Std. disagreements clean: 0.49323940234402547
+
+Total unknown: 602
+Num. disagreements unknown: 291
+Mean disagreements unknown: 0.43569055529188416
+Std. disagreements unknown: 0.39601846152412024

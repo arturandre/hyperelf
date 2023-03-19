@@ -1,0 +1,42 @@
+VGG16 & remove & Yes & 90.51\% & 82.58\% \\
+VGG16 & remove & No & 73.27\% & 67.78\% \\
+VGG16 & positive & Yes & 82.52\% & 80.79\% \\
+VGG16 & positive & No & 67.66\% & 66.71\% \\
+VGG16 & negative & Yes & 85.45\% & 76.49\% \\
+VGG16 & negative & No & 68.44\% & 57.28\% \\
+ResNet50 & remove & Yes & 99.86\% & 84.49\% \\
+ResNet50 & remove & No & 99.96\% & 82.94\% \\
+ResNet50 & positive & Yes & 99.81\% & 77.33\% \\
+ResNet50 & positive & No & 78.04\% & 72.20\% \\
+ResNet50 & negative & Yes & 100\% & 81.26\% \\
+ResNet50 & negative & No & 99.73\% & 75.89\% \\
+ResNet152 & remove & Yes & 99.86\% & 83.05\% \\
+ResNet152 & remove & No & 99.89\% & 82.10\% \\
+ResNet152 & positive & Yes & 79.16\% & 79.24\% \\
+ResNet152 & positive & No & 99.32\% & 77.33\% \\
+ResNet152 & negative & Yes & 99.71\% & 80.43\% \\
+ResNet152 & negative & No & 99.98\% & 77.21\% \\
+MobileNetV3 Large & remove & Yes & 94.83\% & 83.29\% \\
+MobileNetV3 Large & remove & No & 99.68\% & 86.28\% \\
+MobileNetV3 Large & positive & Yes & 89.23\% & 74.94\% \\
+MobileNetV3 Large & positive & No & 99.95\% & 79.36\% \\
+MobileNetV3 Large & negative & Yes & 91.69\% & 78.88\% \\
+MobileNetV3 Large & negative & No & 100\% & 81.74\% \\
+EfficientNetB0 & remove & Yes & 99.61\% & 86.52\% \\
+EfficientNetB0 & remove & No & 99.50\% & \textbf{87.71\%} \\
+EfficientNetB0 & positive & Yes & 99.46\% & 75.89\% \\
+EfficientNetB0 & positive & No & 98.54\% & 80.19\% \\
+EfficientNetB0 & negative & Yes & 92.37\% & 81.62\% \\
+EfficientNetB0 & negative & No & 99.83\% & 83.29\% \\
+DenseNet161 & remove & Yes & 99.96\% & 87.35\% \\
+DenseNet161 & remove & No & 99.54\% & 86.16\% \\
+DenseNet161 & positive & Yes & 79.87\% & 81.15\% \\
+DenseNet161 & positive & No & 73.63\% & 66.35\% \\
+DenseNet161 & negative & Yes & 99.95\% & 82.82\% \\
+DenseNet161 & negative & No & 100\% & 81.62\% \\
+DenseNet121 & remove & Yes & 99.79\% & 86.16\% \\
+DenseNet121 & remove & No & 99.96\% & 84.84\% \\
+DenseNet121 & positive & Yes & 88.01\% & 76.25\% \\
+DenseNet121 & positive & No & 86.23\% & 78.64\% \\
+DenseNet121 & negative & Yes & 100\% & 81.26\% \\
+DenseNet121 & negative & No & 100\% & 82.46\% \\

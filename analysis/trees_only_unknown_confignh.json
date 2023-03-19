@@ -1,0 +1,21 @@
+{
+    "paths":[
+        "/scratch/arturao/hyperelf/outputs/exp024tunh/it",
+        "/scratch/arturao/hyperelf/outputs/exp025tunh/it",
+        "/scratch/arturao/hyperelf/outputs/exp026tunh/it",
+        "/scratch/arturao/hyperelf/outputs/exp027tunh/it",
+        "/scratch/arturao/hyperelf/outputs/exp028tunh/it",
+        "/scratch/arturao/hyperelf/outputs/exp029tunh/it",
+        "/scratch/arturao/hyperelf/outputs/exp031tunh/it"
+    ],
+    "names":
+    [
+        "exp024tunh",
+        "exp025tunh",
+        "exp026tunh",
+        "exp027tunh",
+        "exp028tunh",
+        "exp029tunh",
+        "exp031tunh"
+    ]
+}

@@ -1,0 +1,8 @@
+{
+    "torch_datasets": "/scratch/arturao/data",
+    "trees": "/scratch/arturao/TREES_STUFF/10k_nontrees",
+    "summanTrainBalRev": "/scratch/arturao/TREES_STUFF/treino_naosei/summan_train_nontrees_rev_14112021_balanced.smr",
+    "summanTrainRev": "/scratch/arturao/TREES_STUFF/treino_naosei/summan_train_nontrees_rev_14112021.smr",
+    "summanValRev": "/scratch/arturao/TREES_STUFF/treino_naosei/summan_val_int_rev_14112021.smr",
+    "summanTest": "/scratch/arturao/TREES_STUFF/treino_naosei/summan_val_ext.smr"
+}
