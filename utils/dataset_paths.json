@@ -1,6 +1,6 @@
 {
-    "torch_datasets":          "/scratch/arturao/data",
-    "imagenet":                "/scratch/arturao/data/imagenet",
+    "torch_datasets":          "/scratch/datasets",
+    "imagenet":                "/scratch/datasets/imagenet",
     "trees":                   "/scratch/arturao/TREES_STUFF/10k_nontrees",
     "summanCustomTrain":       "/scratch/arturao/hyperelf/outputs/disagreements-e32-38-fnh/summan_predicted_easy.smr",
     "summanTrain":             "/scratch/arturao/TREES_STUFF/treino_naosei/summan_train.smr",

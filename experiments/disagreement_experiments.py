@@ -7,7 +7,7 @@
 # 2 - Train from scratch the same architecture multiple times,
 # 3 - A combination of the previous approaches.
 
-
+from torchvision.utils import save_image
 from argparse import ArgumentParser
 import os
 import neptune.new as neptune
@@ -36,11 +36,22 @@ if __name__ == "__main__":
         help="Comma separated sequence of experiment folder names inside the experiment base path. It is expected exactly one .pt file in each folder.")
     parser.add_argument('--output-path', type=str,
                         help='(optional) Defines where to create the reports.')
+    parser.add_argument('--dataset-name-clean', type=str,
+        help='The clean dataset')
+    parser.add_argument('--dataset-name-unknown', type=str,
+        help='The unknown dataset')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='disables CUDA training')
+    parser.add_argument('--save-disagreements', action='store_true', default=False,
+                        help='Save images with disagreements.')
+    parser.add_argument('--save-dataset', action='store_true', default=False,
+                        help='Save all the dataset images with the png format.')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
     args = parser.parse_args()
+    
+    dataset_name_clean = args.dataset_name_clean
+    dataset_name_unknown = args.dataset_name_unknown
     basepath = args.expfolder
     expnames = args.expnames.split(",")
 
@@ -49,6 +60,14 @@ if __name__ == "__main__":
         os.makedirs(outpath, exist_ok=True)
     else:
         outpath = ""
+
+    if args.save_dataset:
+        imgdatasetpath = os.path.join(outpath, "dataset")
+        os.makedirs(imgdatasetpath, exist_ok=True)
+    if args.save_disagreements:
+        imgdpath = os.path.join(outpath, "imgdisagreements")
+        os.makedirs(imgdpath, exist_ok=True)
+
     
 
     torch.manual_seed(args.seed)
@@ -58,12 +77,12 @@ if __name__ == "__main__":
 
     #train_kwargs = {'batch_size': args.batch_size}
     #test_kwargs = {'batch_size': args.test_batch_size}
-    train_kwargs = {'batch_size': 80}
-    test_kwargs = {'batch_size': 80}
+    train_kwargs = {'batch_size': 80, 'shuffle': False}
+    test_kwargs = {'batch_size': 80, 'shuffle': False}
     if use_cuda:
         cuda_kwargs = {'num_workers': 1,
                        'pin_memory': True,
-                       'shuffle': True}
+                       }
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
@@ -76,14 +95,14 @@ if __name__ == "__main__":
     ## and each column has predictions for a given network
     train_loader_clean, test_loader_clean =\
         prepare_dataset(
-        dataset_name = "TreesNoUnknown", # from summanTrain
+        dataset_name = dataset_name_clean, # from summanTrain
         use_imagenet_stat = True,
         train_kwargs=train_kwargs,
         test_kwargs=test_kwargs,
     )
     train_loader_unknown, test_loader_unknown =\
         prepare_dataset(
-        dataset_name = "TreesUnknownTestRev", # from summanTrain too (but with labelmode="unknown")
+        dataset_name = dataset_name_unknown, # from summanTrain too (but with labelmode="unknown")
         use_imagenet_stat = True,
         train_kwargs=train_kwargs,
         test_kwargs=test_kwargs,
@@ -97,7 +116,22 @@ if __name__ == "__main__":
     # for the predictions on the training datasets
     # so that experiments can be done with images
     # predicted to be unknown/clean.
+
+    combined_loaded = False
+    first_image = None
+    second_image = None
+    first_label = None
+    second_label = None
+    test_datasets = [
+        ("no_unknown", test_loader_clean),
+        ("unknown", test_loader_unknown)
+    ]
+    train_datasets = [
+            ("no_unknown", train_loader_clean),
+            ("unknown", train_loader_unknown)
+        ]
     for expname in expnames:
+        index_start = 0
         fullpath = os.path.join(basepath, expname)
         files = os.listdir(fullpath)
         pt_files = [f for f in files if f.endswith(".pt")]
@@ -113,25 +147,24 @@ if __name__ == "__main__":
                 "train": None,
                 "test": None
                 }
-            test_datasets = [
-                    ("no_unknown", test_loader_clean),
-                    ("unknown", test_loader_unknown)
-                ]
-            train_datasets = [
-                    ("no_unknown", train_loader_clean),
-                    ("unknown", train_loader_unknown)
-                ]
             for stage_name, dataset_stage in zip(
                 ["train", "test"],
                 [train_datasets, test_datasets]
             ):
+                if os.path.exists(os.path.join(outpath, f'report_disagreements_{stage_name}.csv')):
+                    combined_df[stage_name] = pd.read_csv(os.path.join(outpath, f'report_disagreements_{stage_name}.csv'))
+                    combined_df[stage_name] = combined_df[stage_name].set_index('images')
+                    combined_loaded = True
+                    continue
                 for dataset_name, datasets in dataset_stage:
                     all_names = []
                     all_preds = None
+                    all_labels = None
                     for data, *target in tqdm(datasets):
                         if len(target) == 1:
                             target = target[0]
-                            image_names = None
+                            image_names = list(range(index_start, index_start+len(target)))
+                            index_start += len(target)
                         elif len(target) == 2:
                             # This is important when testing the Trees dataset
                             image_names = target[1]
@@ -141,9 +174,8 @@ if __name__ == "__main__":
                                 f"The number of values unpacked" 
                                 f"from test_loader must be 1 or 2."
                                 )
-
-
-                        data, target = data.to(device), target.to(device)
+                        #data, target = data.to(device), target.to(device)
+                        data = data.to(device)
                         output, intermediate_outputs = model(data, test=True)
                         pred = output.argmax(dim=1, keepdim=True)
                         all_names += image_names
@@ -151,10 +183,15 @@ if __name__ == "__main__":
                             all_preds = pred
                         else:
                             all_preds = torch.concat([all_preds, pred])
+                        if all_labels is None:
+                            all_labels = target
+                        else:
+                            all_labels = torch.concat([all_labels, target])
                     all_preds = all_preds.detach().cpu().numpy().reshape(-1)
                     aux = pd.DataFrame({"images": all_names})
                     aux = aux.set_index("images")
                     aux.loc[:, "dataset_name"] = dataset_name
+                    aux.loc[:, "label"] = all_labels.detach().cpu().numpy().reshape(-1)
                     aux.loc[:, expname] = all_preds
                     if exp_df[stage_name] is None:
                         exp_df[stage_name] = aux
@@ -166,6 +203,9 @@ if __name__ == "__main__":
                     combined_df[stage_name] = pd.concat([combined_df[stage_name], exp_df[stage_name].loc[:, expname]],
                         axis=1, join='inner')
     for stage_name in ["train", "test"]:
+    #for stage_name in ["test"]:
+        #if combined_loaded:
+        #    break
         #combined_df[stage_name].loc[:, "disagreement"] = combined_df[stage_name].loc[:, expnames].sum(axis=1)/len(expnames)
         # AC - # Agreements complement (total - max agreements)
         # DL - # Disagreement Levels (max agreement/number of decisions)
@@ -179,7 +219,115 @@ if __name__ == "__main__":
             DLs.append(dl)
         combined_df[stage_name].loc[:, "disagreement"] = DLs
         combined_df[stage_name].loc[:, "agreement_complement"] = ACs
-        combined_df[stage_name].to_csv(os.path.join(outpath, f'report_disagreements_{stage_name}.csv'))
+        if not combined_loaded:
+            combined_df[stage_name].to_csv(os.path.join(outpath, f'report_disagreements_{stage_name}.csv'))
+        if args.save_dataset or args.save_disagreements:
+            # Here we reload the datasets but
+            # without ImageNet statistics
+            train_loader_clean, test_loader_clean =\
+                prepare_dataset(
+                dataset_name = dataset_name_clean, # from summanTrain
+                use_imagenet_stat = False,
+                train_kwargs=train_kwargs,
+                test_kwargs=test_kwargs,
+            )
+            train_loader_unknown, test_loader_unknown =\
+                prepare_dataset(
+                dataset_name = dataset_name_unknown, # from summanTrain too (but with labelmode="unknown")
+                use_imagenet_stat = False,
+                train_kwargs=train_kwargs,
+                test_kwargs=test_kwargs,
+            )
+        if args.save_dataset:
+            imgdatasetpath_ = os.path.join(imgdatasetpath, stage_name)
+            os.makedirs(imgdatasetpath_, exist_ok=True)
+            scanned_dataset_loader = iter(train_loader_clean) if stage_name == "train" else iter(test_loader_clean)
+            changed_to_unknown_loader = False
+            previous_batch_index = 0
+            first_index = combined_df[stage_name].iloc[0].name
+            last_index = 0
+            current_batch = next(scanned_dataset_loader)
+            for index, row in tqdm(combined_df[stage_name].iterrows(), total=len(combined_df[stage_name])):
+                batch_index = (index-first_index-last_index) // train_kwargs['batch_size']
+                img_index = (index-first_index-last_index) % train_kwargs['batch_size']
+                # Check if len(scanned_dataset_loader) == len(train_loader_clean) 
+                if (batch_index >= len(scanned_dataset_loader))\
+                    or ( #Last batch can be smaller
+                        (img_index >= len(current_batch[0])
+                         or last_index > 0)
+                        ):
+                    if (img_index == len(current_batch[0])
+                         or last_index > 0): #Last batch is equal all other batches
+                        batch_index -= (len(scanned_dataset_loader)-1)
+                    else: # Last batch is smaller
+                        batch_index -= len(scanned_dataset_loader)
+                    if not changed_to_unknown_loader:
+                        last_index = len(current_batch[0])
+                        img_index = 0
+                        scanned_dataset_loader = iter(train_loader_unknown)  if stage_name == "train" else iter(test_loader_unknown)
+                        current_batch = next(scanned_dataset_loader)
+                        previous_batch_index = 0
+                        changed_to_unknown_loader = True
+                for i in range(previous_batch_index, batch_index):
+                    current_batch = next(scanned_dataset_loader)
+                images, labels = current_batch
+                current_image = images[img_index]
+                current_label = labels[img_index]
+                save_path = os.path.join(imgdatasetpath_, f"{index-first_index}_{str(current_label.numpy())}.png")
+                if not os.path.exists(save_path):
+                    save_image(current_image, save_path)
+                
+                previous_batch_index = batch_index
+        if args.save_disagreements:
+            imgdpath_ = os.path.join(imgdpath, stage_name)
+            os.makedirs(imgdpath_, exist_ok=True)
+            disimages = combined_df[stage_name][np.array(ACs) > 0]
+            scanned_dataset_loader = iter(train_loader_clean) if stage_name == "train" else iter(test_loader_clean)
+            changed_to_unknown_loader = False
+            previous_batch_index = 0
+            last_index = 0
+            first_index = combined_df[stage_name].iloc[0].name
+            current_batch = next(scanned_dataset_loader)
+            for index, row in tqdm(disimages.iterrows(), total=len(disimages)):
+                batch_index = (index-first_index-last_index) // train_kwargs['batch_size']
+                img_index = (index-first_index-last_index) % train_kwargs['batch_size']
+                # Important for smaller last batches
+                #if batch_index >= len(scanned_dataset_loader)-1:
+                if not changed_to_unknown_loader:
+                    for i in range(previous_batch_index, batch_index-1):
+                        current_batch = next(scanned_dataset_loader)
+                if (batch_index >= len(scanned_dataset_loader))\
+                    or ( #Last batch can be smaller
+                        (img_index >= len(current_batch[0])
+                         or last_index > 0)
+                        ):
+                    if (img_index >= len(current_batch[0])
+                         or last_index > 0): #Last batch is equal all other batches
+                        batch_index -= (len(scanned_dataset_loader)-1)
+                    else: # Last batch is smaller
+                        batch_index -= len(scanned_dataset_loader)
+                    if not changed_to_unknown_loader:
+                        last_index = len(current_batch[0])
+                        img_index = (index-first_index-last_index) % train_kwargs['batch_size']
+                        scanned_dataset_loader = iter(train_loader_unknown)  if stage_name == "train" else iter(test_loader_unknown)
+                        current_batch = next(scanned_dataset_loader)
+                        previous_batch_index = 0
+                        changed_to_unknown_loader = True
+                #if batch_index < len(scanned_dataset_loader)-1:
+                if changed_to_unknown_loader:
+                    for i in range(previous_batch_index, batch_index):
+                        current_batch = next(scanned_dataset_loader)
+                #if batch_index >= len(scanned_dataset_loader):
+                #    for i in range(previous_batch_index, batch_index):
+                #        current_batch = next(scanned_dataset_loader)
+                images, labels = current_batch
+                current_image = images[img_index]
+                current_label = labels[img_index]
+                save_path = os.path.join(imgdpath_, f"{index-first_index}_{str(current_label.numpy())}.png")
+                if not os.path.exists(save_path):
+                    save_image(current_image, save_path)
+                
+                previous_batch_index = batch_index
 
         unanimous = (combined_df[stage_name].loc[:, "disagreement"]%1).values == 0
         clean = (combined_df[stage_name].loc[:, "dataset_name"] == "no_unknown").values

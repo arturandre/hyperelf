@@ -34,7 +34,11 @@ script_full_path=$(dirname "$0")
 # than training with the whole training
 # dataset.
 
-dbname="trees"
+
+# For some reason the script for multiple experiments (e.g. with/without Early exits)
+# never runs the last experiment. So this is a workaround to run the last experiment.
+
+dbname="imagenet"
 
 #expnames=("exp036" "exp037" "exp038")
 #networknames=("resnet152" "resnet50" "efficientnet")
@@ -42,9 +46,9 @@ dbname="trees"
 expnames=("exp039")
 networknames=("resnet50")
 networknameselyx=("ResNet50Elyx")
-datasetnames=("ImageNet2012Half" "ImageNet2012Half")
-elyxheads=("2" "None" )
-suffixes=("" "nh")
+datasetnames=("ImageNet2012Half")
+elyxheads=("None" )
+suffixes=("nh")
 
 for i in "${!expnames[@]}"; do
     expname=${expnames[i]}
@@ -55,6 +59,7 @@ for i in "${!expnames[@]}"; do
         expnamesuffix=${suffixes[j]}
         datasetname=${datasetnames[j]}
         nohup python ${script_full_path}/general_experiment.py \
+        --from-scratch \
         --exp-name ${expname}${expnamesuffix} \
         --output-folder "/scratch/arturao/hyperelf/outputs/${expname}${expnamesuffix}" \
         --log-file "${expname}${expnamesuffix}_${dbname}_${networkname}.log" \

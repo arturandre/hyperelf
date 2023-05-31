@@ -84,7 +84,8 @@ class IterationScheduler:
 def main():
     global nlogger
     # Training settings
-    parser = argparse.ArgumentParser(description="PyTorch General Script")
+    parser = argparse.ArgumentParser(
+        description="PyTorch General Script")
     parser.add_argument('--exp-name', type=str,
         help='Name to be logged on neptune.ai')
     parser.add_argument('--network-name', type=str,
@@ -93,6 +94,12 @@ def main():
         help='Which Elyx Head should be used?')
     parser.add_argument('--dataset-name', type=str,
         help='Which dataset should be loaded?')
+    parser.add_argument('--custom-disagreement-csv', type=str,
+        help="(Optional) The disagreements csv to use when loading a "
+        "customized version of a dataset (e.g. MNISTCustom).")
+    parser.add_argument('--custom-disagreement-threshold', type=int, default=0,
+        help="(Optional) The disagreements threshold to be used with the --custom-disagreement-csv option."
+        "Default: 0 - All models should agree.")
     parser.add_argument('--batch-size', type=int, default=250, metavar='N',
                         help='input batch size for training (default: 256)')
     parser.add_argument('--test-batch-size', type=int, default=250, metavar='N',
@@ -165,8 +172,9 @@ def main():
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
+    dataset_name = args.dataset_name
     num_classes, num_channels = \
-        get_dataset_info(dataset_name = args.dataset_name)
+        get_dataset_info(dataset_name=dataset_name)
 
     model, base_network_name, model_name = get_network(
         network_name=args.network_name,
@@ -183,6 +191,8 @@ def main():
         use_imagenet_stat = not args.from_scratch,
         train_kwargs=train_kwargs,
         test_kwargs=test_kwargs,
+        custom_disagreement_csv=args.custom_disagreement_csv,
+        custom_disagreement_threshold=args.custom_disagreement_threshold,
     )
 
     if args.load_model is not None:
