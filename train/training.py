@@ -13,7 +13,7 @@ from train.focal_loss import FocalLoss
 
 bar_width = 0.5
 
-def train(args, model, device, train_loader, optimizer, epoch, nlogger):
+def train(args, model, device, train_loader, optimizer, epoch, nlogger, use_fsdp=False):
     model.train()
     start = timer()
     epoch_loss = 0
@@ -21,6 +21,7 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger):
     it_epoch_entropy = {}
     correct = 0
     start_epoch = timer()
+    print(f"test nlogger: {nlogger}")
     try:
         if args.loss == 'nll':
             loss_func = F.nll_loss
@@ -42,17 +43,21 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger):
             # This is important when testing the Trees dataset
             image_names = target[1]
             target = target[0]
-        data, target = data.to(device), target.to(device)
+        if not use_fsdp:
+            data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         start = timer()
         output, intermediate_outputs = model(data, gt=target)
         end = timer()
         train_batch_time = end-start
-        nlogger.log_train_batch_time(end-start)
+        if nlogger is not None:
+            nlogger.log_train_batch_time(end-start)
+        output = output.to(target.device)
         loss = loss_func(output, target)
         epoch_loss += loss
         it_batch_entropy = []
         for i, it_out in enumerate(intermediate_outputs):
+            it_out = it_out.to(target.device)
             it_loss = loss_func(it_out, target)
             it_entropy = shannon_entropy(it_out)
             loss += it_loss
@@ -61,8 +66,8 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger):
                 it_epoch_entropy[i] = it_entropy*len(it_out)
             else:
                 it_epoch_entropy[i] += it_entropy*len(it_out)
-        
-        nlogger.log_train_batch_it_entropy(it_batch_entropy)
+        if nlogger is not None:
+            nlogger.log_train_batch_it_entropy(it_batch_entropy)
         
 
         loss = loss/(len(intermediate_outputs)+1)
@@ -73,8 +78,9 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger):
         optimizer.step()
         entropy = shannon_entropy(output)
         epoch_entropy += entropy*len(output)
-        nlogger.log_train_batch_correct(batch_correct/len(target))
-        nlogger.log_train_batch_entropy(entropy)
+        if nlogger is not None:
+            nlogger.log_train_batch_correct(batch_correct/len(target))
+            nlogger.log_train_batch_entropy(entropy)
         if batch_idx % args.log_interval == 0:
             print(
                 (f"Train Epoch: {epoch} ",
@@ -95,14 +101,16 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger):
             if args.dry_run:
                 break
     end_epoch = timer()
-    nlogger.log_train_time(end_epoch-start_epoch)
+    if nlogger is not None:
+        nlogger.log_train_time(end_epoch-start_epoch)
     epoch_entropy /= len(train_loader.dataset)
     it_epoch_entropy = list(it_epoch_entropy.values())
     for i in range(len(it_epoch_entropy)):
         it_epoch_entropy[i] /= len(train_loader.dataset)
-    nlogger.log_train_entropy(epoch_entropy)
-    nlogger.log_train_it_entropy(it_epoch_entropy)
-    nlogger.log_train_correct(correct/len(train_loader.dataset))
+    if nlogger is not None:
+        nlogger.log_train_entropy(epoch_entropy)
+        nlogger.log_train_it_entropy(it_epoch_entropy)
+        nlogger.log_train_correct(correct/len(train_loader.dataset))
 
 
 
@@ -128,7 +136,7 @@ def log_it_data(log_it_folder, batch, last_exit, output,
             entropy = shannon_entropy(image_prob.unsqueeze(0), from_logits=False)
             correct = 1 if image_pred == image_gt else 0
             if image_names is not None:
-                image_name = image_names[i]
+                image_name = str(image_names[i])
             #probabilities plot
             #QuickRef: https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.bar.html
             x_axis = list(range(1, 1+len(image_prob)))
@@ -145,7 +153,6 @@ def log_it_data(log_it_folder, batch, last_exit, output,
 
             f.write(f"{image_name}, {last_exit}, {entropy}, {image_gt}, {image_pred}, {correct}\n")
             save_image(image, os.path.join(exit_folder, f"{os.path.split(image_name)[-1]}.png"))
-
             for j in range(len(intermediate_outputs)):
                 image_it_prob = torch.nn.functional.softmax(intermediate_outputs[j][i], dim=0)
                 image_it_pred = torch.argmax(image_it_prob)
@@ -154,7 +161,7 @@ def log_it_data(log_it_folder, batch, last_exit, output,
                 entropy = shannon_entropy(image_it_prob.unsqueeze(0), from_logits=False)
                 correct = 1 if image_pred == image_gt else 0
                 if image_names is not None:
-                    image_name = image_names[i]
+                    image_name = str(image_names[i])
                 #probabilities plot
                 #QuickRef: https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.bar.html
                 x_axis = list(range(1, 1+len(image_prob)))
@@ -169,7 +176,7 @@ def log_it_data(log_it_folder, batch, last_exit, output,
                 plt.savefig(os.path.join(prev_exits_folder, f"{os.path.split(image_name)[-1]}_probs_plot_it_{j}.png"))
                 plt.close()
 
-def test(model, device, test_loader, nlogger, log_it_folder=None):
+def test(model, device, test_loader, nlogger=None, log_it_folder=None, use_fsdp=False):
     model.eval()
     test_loss = 0
     test_entropy = 0
@@ -178,6 +185,7 @@ def test(model, device, test_loader, nlogger, log_it_folder=None):
     it_epoch_correct = {}
     start_epoch = timer()
     last_image_idx = 0
+    print(f"test nlogger: {nlogger}")
     with torch.no_grad():
         for data, *target in tqdm(test_loader):
             if len(target) == 1:
@@ -190,20 +198,22 @@ def test(model, device, test_loader, nlogger, log_it_folder=None):
             else:
                 raise Exception("The number of values unpacked from test_loader must be 1 or 2.")
 
-
-            data, target = data.to(device), target.to(device)
+            if not use_fsdp:
+                data, target = data.to(device), target.to(device)
             
             #output, intermediate_outputs = model(data, EntropyCriterion(gt=target))
             start = timer()
             output, intermediate_outputs = model(data, test=True)
             end = timer()
             pred = output.argmax(dim=1, keepdim=True)
-            nlogger.log_test_batch_time(end-start)
+            if nlogger is not None:
+                nlogger.log_test_batch_time(end-start)
             last_exit = model.get_last_exit()
-            nlogger.log_test_last_exit(last_exit)
             test_batch_entropy = shannon_entropy(output)
-            nlogger.log_test_batch_entropy(test_batch_entropy)
             test_entropy += test_batch_entropy*len(output)
+            if nlogger is not None:
+                nlogger.log_test_last_exit(last_exit)
+                nlogger.log_test_batch_entropy(test_batch_entropy)
 
             batch_it_entropies = []
             batch_it_corrects = []
@@ -227,12 +237,13 @@ def test(model, device, test_loader, nlogger, log_it_folder=None):
                     it_epoch_entropy[i] = batch_it_entropy*len(it_out)
                 else:
                     it_epoch_entropy[i] += batch_it_entropy*len(it_out)
-            nlogger.log_test_batch_it_entropy(batch_it_entropies)
-            nlogger.log_test_batch_it_correct(batch_it_corrects)
 
             test_loss = test_loss/(len(intermediate_outputs)+1)
             batch_correct = pred.eq(target.view_as(pred)).sum().item()
-            nlogger.log_test_batch_correct(batch_correct/len(target))
+            if nlogger is not None:
+                nlogger.log_test_batch_it_entropy(batch_it_entropies)
+                nlogger.log_test_batch_it_correct(batch_it_corrects)
+                nlogger.log_test_batch_correct(batch_correct/len(target))
             
             correct += batch_correct
             print(
@@ -251,16 +262,18 @@ def test(model, device, test_loader, nlogger, log_it_folder=None):
 
                     
     end_epoch = timer()
-    nlogger.log_test_time(end_epoch-start_epoch)
+    if nlogger is not None:
+        nlogger.log_test_time(end_epoch-start_epoch)
 
     test_entropy /= len(test_loader.dataset)
-    nlogger.log_test_entropy(test_entropy)
     test_loss /= len(test_loader.dataset)
     it_epoch_entropy = list(it_epoch_entropy.values())
     for i in range(len(it_epoch_entropy)):
         it_epoch_entropy[i] /= len(test_loader.dataset)
-    nlogger.log_test_it_entropy(it_epoch_entropy)
-    nlogger.log_test_correct(correct/len(test_loader.dataset))
+    if nlogger is not None:
+        nlogger.log_test_entropy(test_entropy)
+        nlogger.log_test_it_entropy(it_epoch_entropy)
+        nlogger.log_test_correct(correct/len(test_loader.dataset))
 
 
     print(

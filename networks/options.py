@@ -11,6 +11,7 @@ from networks.elyx_efficientnet import EfficientNetB0Elyx
 from networks.elyx_densenet import DenseNet121Elyx, DenseNet161Elyx
 from networks.elyx_vgg import VGG19Elyx, VGG16Elyx
 from networks.elyx_mobilenetv3 import MobileNetV3LargeElyx
+from networks.elyx_mobilenetv2 import MobileNetV2Elyx
 from networks.elyx_resnet import ResNet50Elyx, ResNet152Elyx
 from utils.iteration_criterion import EntropyCriterion
 
@@ -20,8 +21,9 @@ def get_network(
     num_channels,
     ElyxHead=1,
     from_scratch=False,
+    keep_head=False,
     freeze_backbone=False,
-    device="cuda"):
+    use_timm=False):
     pretrained = not from_scratch
     if freeze_backbone and (not pretrained):
         print("WARNING: The Backbone is frozen and the network is not pretrained!")
@@ -31,6 +33,8 @@ def get_network(
         "early_exit_criteria": EntropyCriterion(),
         "elyx_head": ElyxHead,
         "pretrained": pretrained,
+        "keep_head": keep_head,
+        "use_timm": use_timm,
         }
     if network_name == "ResNet50Elyx":
         model = ResNet50Elyx(
@@ -39,6 +43,9 @@ def get_network(
     elif network_name == "ResNet152Elyx":
         model = ResNet152Elyx(**params)
         base_network_name = "resnet"
+    elif network_name == "MobileNetV2Elyx":
+        model = MobileNetV2Elyx(**params)
+        base_network_name = "mobilenet_v2"
     elif network_name == "MobileNetV3LargeElyx":
         model = MobileNetV3LargeElyx(**params)
         base_network_name = "mobilenetv3_large"
@@ -68,13 +75,10 @@ def get_network(
             nn.Dropout(dropout),
             nn.Linear(output_channel, num_classes),
         )
-        model.to(device)
         base_network_name = "mobilenetv3_large"
     else:
         raise NotImplementedError(f"Invalid option for network name: {network_name}")
     if freeze_backbone:
         model.freeze_backbone()
-    model = model.to(device)
-    model_name = f"{network_name}{ElyxHead}"
     
-    return model, base_network_name, model_name
+    return model, base_network_name

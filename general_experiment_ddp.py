@@ -57,11 +57,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 
-from torch.distributed.fsdp import (
-   FullyShardedDataParallel as FSDP,
-   CPUOffload,
-)
-
 verbose = 1
 
 def set_verbose(new_verbose_level):
@@ -91,7 +86,7 @@ def setup(rank, world_size):
     os.environ['MASTER_PORT'] = '12355'
 
     # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
@@ -101,13 +96,13 @@ def main_loop(rank, args, nlogger):
     world_size = None
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     torch.manual_seed(args.seed)
+    device = torch.device("cuda" if use_cuda else "cpu")
 
-    if args.use_fsdp:
+    if args.use_ddp:
         world_size = args.world_size
+        device = rank
         setup(rank, world_size)
-        device = None
-    else:
-        device = "cuda" if use_cuda else "cpu"
+
 
     train_kwargs = {'batch_size': args.batch_size}
     test_kwargs = {'batch_size': args.test_batch_size}
@@ -133,9 +128,8 @@ def main_loop(rank, args, nlogger):
         from_scratch=args.from_scratch,
         keep_head=args.keep_head,
         freeze_backbone=args.freeze_backbone,
+        device=device,
         use_timm=args.use_timm)
-
-    
 
     train_loader, test_loader =\
         prepare_dataset(
@@ -145,7 +139,6 @@ def main_loop(rank, args, nlogger):
         test_kwargs=test_kwargs,
         custom_disagreement_csv=args.custom_disagreement_csv,
         custom_disagreement_threshold=args.custom_disagreement_threshold,
-        use_ddp=args.use_ddp,
     )
 
     if args.load_model is not None:
@@ -155,18 +148,10 @@ def main_loop(rank, args, nlogger):
 
         #Loading the whole model
         model = torch.load(args.load_model)
-
-    if args.use_fsdp:
-        torch.cuda.set_device(rank)
-        model = FSDP(
-            model,
-            cpu_offload=CPUOffload(offload_params=True),
-            device_id=rank
-            )
-    elif args.use_ddp:
         model = model.to(device)
-        model = DDP(model, device_ids=[device])
-        
+    
+    model = DDP(model, device_ids=[device])
+
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
@@ -181,9 +166,9 @@ def main_loop(rank, args, nlogger):
                     for each training epoch a set of images would be
                     produced for each intermediate exit.
                     """)
-            train(args, model, device, train_loader, optimizer, epoch, nlogger=nlogger, use_fsdp=args.use_fsdp)
+            train(args, model, device, train_loader, optimizer, epoch, nlogger=nlogger)
         
-        correct_test = test(model, device, test_loader, nlogger=nlogger, log_it_folder=args.log_it_folder, use_fsdp=args.use_fsdp)
+        correct_test = test(model, device, test_loader, nlogger=nlogger, log_it_folder=args.log_it_folder)
         if correct_test > correct_test_max \
             and (not args.only_test or args.force_save): 
             correct_test_max = correct_test
@@ -192,7 +177,7 @@ def main_loop(rank, args, nlogger):
                     f"{args.save_model}.pt")
                 if (not args.use_ddp) or (args.use_ddp and rank == 0):
                     torch.save(model, save_path)
-                if (not args.fsdp) and args.use_ddp:
+                if args.use_ddp:
                   dist.barrier()
                   map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
                   ddp_model.load_state_dict(
@@ -204,7 +189,7 @@ def main_loop(rank, args, nlogger):
             break
         scheduler.step()
 
-    if (not args.fsdp) and args.use_ddp:
+    if args.use_ddp:
         cleanup()
 
 def main():
@@ -217,8 +202,6 @@ def main():
         help='Which network should be used?')
     parser.add_argument('--use-timm', action='store_true', default=False,
         help='Use models from the timm packages? (Only useful for pretrained models).')
-    parser.add_argument('--use-fsdp', action='store_true', default=False,
-        help='Use Fully Sharding Data Parallel? Implies --use-ddp.')
     parser.add_argument('--use-ddp', action='store_true', default=False,
         help='Use DistributedDataParallel? ')
     parser.add_argument('--world-size', type=int, default=1,
@@ -286,9 +269,6 @@ def main():
     project_tags = []
     if args.project_tags is not None:
         project_tags += args.project_tags.split(",")
-    
-    if args.use_fsdp:
-        args.use_ddp = True
 
     if args.silence:
         tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
@@ -326,7 +306,7 @@ def main():
             project=args.nep_project,
             api_token=args.nep_api_token)
         nlogger.setup_neptune(nparams)
-        main_loop(rank="cuda", args=args, nlogger=nlogger)
+        main_loop(rank="cuda", args=args)
 
 
     
