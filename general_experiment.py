@@ -61,6 +61,10 @@ from torch.distributed.fsdp import (
    FullyShardedDataParallel as FSDP,
    CPUOffload,
 )
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    always_wrap_policy,
+)
 
 verbose = 1
 
@@ -98,6 +102,7 @@ def cleanup():
 
 def main_loop(rank, args, nlogger):
 
+    ddp_kwargs = None
     world_size = None
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     torch.manual_seed(args.seed)
@@ -108,6 +113,12 @@ def main_loop(rank, args, nlogger):
         device = None
     else:
         device = "cuda" if use_cuda else "cpu"
+    
+    if args.use_ddp:
+        ddp_kwargs = {
+            'rank': rank,
+            'num_replicas': args.world_size,
+        }
 
     train_kwargs = {'batch_size': args.batch_size}
     test_kwargs = {'batch_size': args.test_batch_size}
@@ -145,7 +156,7 @@ def main_loop(rank, args, nlogger):
         test_kwargs=test_kwargs,
         custom_disagreement_csv=args.custom_disagreement_csv,
         custom_disagreement_threshold=args.custom_disagreement_threshold,
-        use_ddp=args.use_ddp,
+        ddp_kwargs=ddp_kwargs,
     )
 
     if args.load_model is not None:
@@ -161,8 +172,11 @@ def main_loop(rank, args, nlogger):
         model = FSDP(
             model,
             cpu_offload=CPUOffload(offload_params=True),
-            device_id=rank
+            device_id=rank,
+            auto_wrap_policy=size_based_auto_wrap_policy
+            #auto_wrap_policy=always_wrap_policy
             )
+        print(f"FSDP parameters device: {next(model.parameters()).device}")
     elif args.use_ddp:
         model = model.to(device)
         model = DDP(model, device_ids=[device])
@@ -183,20 +197,41 @@ def main_loop(rank, args, nlogger):
                     """)
             train(args, model, device, train_loader, optimizer, epoch, nlogger=nlogger, use_fsdp=args.use_fsdp)
         
-        correct_test = test(model, device, test_loader, nlogger=nlogger, log_it_folder=args.log_it_folder, use_fsdp=args.use_fsdp)
+        correct_test, test_loss = test(
+            model,
+            device,
+            test_loader,
+            nlogger=nlogger,
+            log_it_folder=args.log_it_folder,
+            use_fsdp=args.use_fsdp,
+            return_loss=True)
         if correct_test > correct_test_max \
             and (not args.only_test or args.force_save): 
             correct_test_max = correct_test
             if args.save_model is not None:
                 save_path = os.path.join(args.output_folder,
                     f"{args.save_model}.pt")
-                if (not args.use_ddp) or (args.use_ddp and rank == 0):
+                if args.use_ddp:
+                    if rank == 0:
+                        torch.save({
+                            'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'loss': test_loss,
+                        }, save_path)
+                else:
                     torch.save(model, save_path)
-                if (not args.fsdp) and args.use_ddp:
-                  dist.barrier()
-                  map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
-                  ddp_model.load_state_dict(
-                    torch.load(save_path, map_location=map_location))
+                if args.use_ddp:
+                    dist.barrier()
+                    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+                    checkpoint = torch.load(save_path, map_location=map_location)
+                    #model.load_state_dict(
+                    #  torch.load(save_path, map_location=map_location))
+                    model.load_state_dict(
+                        checkpoint['model_state_dict'])
+                    optimizer.load_state_dict(
+                        checkpoint['optimizer_state_dict'])
+                
                 #torch.save(model.state_dict(), save_path)
                 #model_scripted = torch.jit.script(model)
                 #model_scripted.save(save_path)
@@ -327,12 +362,6 @@ def main():
             api_token=args.nep_api_token)
         nlogger.setup_neptune(nparams)
         main_loop(rank="cuda", args=args, nlogger=nlogger)
-
-
-    
-
-    
-
 
 if __name__ == '__main__':
     main()

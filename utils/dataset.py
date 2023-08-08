@@ -215,7 +215,7 @@ def prepare_dataset(
     custom_disagreement_csv=None,
     custom_disagreement_threshold=0,
     shuffle_trainval=True,
-    use_ddp=False):
+    ddp_kwargs=None):
     """
     (optional) custom_disagreement_csv is a csv with
     the disagreements of networks about the class
@@ -236,6 +236,8 @@ def prepare_dataset(
     transform=transforms.Compose(t_list)
     #else:
     #    raise Exception("base network not implemented in dataset.py at prepare_dataset!")
+    train_loader = None
+    test_loader = None
     if dataset_name == "STL10":
         train_dataset = datasets.STL10(data_folder['torch_datasets'], split="train", download=True,
                        transform=transform)
@@ -263,11 +265,16 @@ def prepare_dataset(
         #train_loader = torch.utils.data.DataLoader(
         #    dataset=torch.utils.data.Subset(train_dataset, train_idx),
         #    sampler=train_sampler, **train_kwargs)
-        train_loader = torch.utils.data.DataLoader(dataset=train_dataset, **train_kwargs)
-        test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
+        # if ddp_kwargs is not None:
+        #     train_kwargs["sampler"] = DistributedSampler(train_dataset, **ddp_kwargs)
+        #     test_kwargs["sampler"] = DistributedSampler(test_dataset, **ddp_kwargs)
+        # train_loader = torch.utils.data.DataLoader(dataset=train_dataset, **train_kwargs)
+        # test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
         if dataset_name in [
             "CIFAR100Half", "CIFAR100HalfValid",
             "CIFAR100Custom", "CIFAR100CustomHalfValid"]:
+            if ddp_kwargs is not None:
+                raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
             # Ref: https://gist.github.com/kevinzakka/d33bf8d6c7f06a9d8c76d97a7879f5cb
             # targets = train_dataset.targets
             targets = train_dataset.targets
@@ -352,7 +359,6 @@ def prepare_dataset(
                 train_loader = torch.utils.data.DataLoader(
                     dataset=torch.utils.data.Subset(train_dataset, onlyagreedidx),
                     sampler=onlyagreed_sampler, **train_kwargs)
-        return train_loader, test_loader
     elif dataset_name in [
         "MNIST", "MNISTHalf", "MNISTHalfValid",
         "MNISTCustom"]:
@@ -367,7 +373,11 @@ def prepare_dataset(
         #
         #
         #
-        with open('../data/tfds_mnist.pickle', 'rb') as handle:
+        mnist_pickle = os.path.join(
+            data_folder['torch_datasets'],
+            "tfds_mnist.pickle"
+            )
+        with open(mnist_pickle, 'rb') as handle:
             raw_data = pickle.load(handle)
         train_images = raw_data['train']['image']
         #train_images = train_images.astype(np.float32) / 255
@@ -384,12 +394,16 @@ def prepare_dataset(
             images=test_images,
             labels=test_int_labels,
             transform=transform)
-        train_loader = torch.utils.data.DataLoader(
-                    dataset=train_dataset, **train_kwargs)
-        test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
+        # if ddp_kwargs is not None:
+        #     train_kwargs["sampler"] = DistributedSampler(train_dataset, **ddp_kwargs)
+        #     test_kwargs["sampler"] = DistributedSampler(test_dataset, **ddp_kwargs)
+        # train_loader = torch.utils.data.DataLoader(dataset=train_dataset, **train_kwargs)
+        # test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
         if dataset_name in [
             "MNISTHalf", "MNISTHalfValid",
             "MNISTCustom"]:
+            if ddp_kwargs is not None:
+            	raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
             # Ref: https://gist.github.com/kevinzakka/d33bf8d6c7f06a9d8c76d97a7879f5cb
             targets = train_dataset.targets
             train_idx, valid_idx= train_test_split(
@@ -436,8 +450,6 @@ def prepare_dataset(
                 train_loader = torch.utils.data.DataLoader(
                     dataset=torch.utils.data.Subset(train_dataset, onlyagreedidx),
                     sampler=onlyagreed_sampler, **train_kwargs)
-
-        return train_loader, test_loader
     elif dataset_name in ["ImageNet2012",
         "ImageNet2012Half",
         "ImageNet2012HalfValid"]:
@@ -449,10 +461,15 @@ def prepare_dataset(
             data_folder['imagenet'],
             split="val",
             transform=transform)
-        train_loader = torch.utils.data.DataLoader(train_dataset, **train_kwargs)
-        test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
+        # if ddp_kwargs is not None:
+        #     train_dataset = DistributedSampler(train_dataset, **ddp_kwargs)
+        #     test_dataset = DistributedSampler(test_dataset, **ddp_kwargs)
+        #train_loader = torch.utils.data.DataLoader(train_dataset, **train_kwargs)
+        #test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
         if dataset_name in ["ImageNet2012Half",
             "ImageNet2012HalfValid"]:
+            if ddp_kwargs is not None:
+	            raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
             # Ref: https://gist.github.com/kevinzakka/d33bf8d6c7f06a9d8c76d97a7879f5cb
             targets = train_dataset.targets
             train_idx, valid_idx= train_test_split(
@@ -477,8 +494,9 @@ def prepare_dataset(
                 train_loader = torch.utils.data.DataLoader(
                     dataset=train_dataset,
                     sampler=valid_sampler, **train_kwargs)
-        return train_loader, test_loader
     elif dataset_name in ["ImageNetO"]:
+        if ddp_kwargs is not None:
+        	raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
         image_o_test_kwargs = {
             "images_path": data_folder['imagenet-O'],
             "transform": transform
@@ -486,6 +504,8 @@ def prepare_dataset(
         train_dataset = None
         test_dataset = ImageNetO(**image_o_test_kwargs)
     elif dataset_name in ["ImageNetA"]:
+        if ddp_kwargs is not None:
+	        raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
         train_kwargs['shuffle'] = False
         test_kwargs['shuffle'] = False
         image_a_test_kwargs = {
@@ -546,6 +566,9 @@ def prepare_dataset(
                 tree_test_kwargs["label_mode"] = "unknown"
         train_dataset = TreesDataset(**tree_train_kwargs)
         test_dataset = TreesDataset(**tree_test_kwargs)
+        if ddp_kwargs is not None:
+            train_dataset = DistributedSampler(train_dataset, **ddp_kwargs)
+            test_dataset = DistributedSampler(test_dataset, **ddp_kwargs)
     elif dataset_name == "iNaturalist2021Mini":
         train_dataset = datasets.INaturalist(
             data_folder['torch_datasets'],
@@ -555,11 +578,18 @@ def prepare_dataset(
             data_folder['torch_datasets'],
             version="2021_valid", download=False,
             transform=transform)
-
-    if train_dataset is not None:
-        train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
-    else:
-        train_loader = None
-    test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
-    
+        # if ddp_kwargs is not None:
+        #     train_dataset = DistributedSampler(train_dataset, **ddp_kwargs)
+        #     test_dataset = DistributedSampler(test_dataset, **ddp_kwargs)
+    if ddp_kwargs is not None:
+        train_kwargs["shuffle"] = False
+        test_kwargs["shuffle"] = False
+        train_kwargs["sampler"] = DistributedSampler(train_dataset, **ddp_kwargs)
+        test_kwargs["sampler"] = DistributedSampler(test_dataset, **ddp_kwargs)
+    if train_loader is None:
+        if train_dataset is not None:
+            train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
+    if test_loader is None:
+        if test_dataset is not None:
+            test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
     return train_loader, test_loader

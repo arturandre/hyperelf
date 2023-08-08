@@ -176,7 +176,14 @@ def log_it_data(log_it_folder, batch, last_exit, output,
                 plt.savefig(os.path.join(prev_exits_folder, f"{os.path.split(image_name)[-1]}_probs_plot_it_{j}.png"))
                 plt.close()
 
-def test(model, device, test_loader, nlogger=None, log_it_folder=None, use_fsdp=False):
+def test(
+    model,
+    device,
+    test_loader,
+    nlogger=None,
+    log_it_folder=None,
+    use_fsdp=False,
+    return_loss=False):
     model.eval()
     test_loss = 0
     test_entropy = 0
@@ -217,14 +224,17 @@ def test(model, device, test_loader, nlogger=None, log_it_folder=None, use_fsdp=
 
             batch_it_entropies = []
             batch_it_corrects = []
+            output = output.to(target.device)
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             for i, it_out in enumerate(intermediate_outputs):
+                it_out = it_out.to(target.device)
                 it_loss = F.nll_loss(it_out, target, reduction='sum').item()
                 batch_it_entropy = shannon_entropy(it_out)
                 test_loss += it_loss
                 pred_it = it_out.argmax(dim=1, keepdim=True)
                 
                 # The mean is taken because the accuracy of the whole batch is considered
+                pred_it = pred_it.to(target.device)
                 batch_it_correct = pred_it.eq(target.view_as(pred_it)).sum().item()/len(it_out)
                 
                 batch_it_entropies.append(batch_it_entropy)
@@ -239,6 +249,7 @@ def test(model, device, test_loader, nlogger=None, log_it_folder=None, use_fsdp=
                     it_epoch_entropy[i] += batch_it_entropy*len(it_out)
 
             test_loss = test_loss/(len(intermediate_outputs)+1)
+            pred = pred.to(target.device)
             batch_correct = pred.eq(target.view_as(pred)).sum().item()
             if nlogger is not None:
                 nlogger.log_test_batch_it_entropy(batch_it_entropies)
@@ -258,9 +269,6 @@ def test(model, device, test_loader, nlogger=None, log_it_folder=None, use_fsdp=
                     image_names = list(range(last_image_idx, last_image_idx+len(data)))
                 log_it_data(log_it_folder, data, last_exit, output, intermediate_outputs, target, image_names=image_names)
                 last_image_idx += len(data)
-                
-
-                    
     end_epoch = timer()
     if nlogger is not None:
         nlogger.log_test_time(end_epoch-start_epoch)
@@ -286,4 +294,7 @@ def test(model, device, test_loader, nlogger=None, log_it_folder=None, use_fsdp=
         f"\nTest set: Average loss: {test_loss:.4f},"
         f" Accuracy: {correct}/{len(test_loader.dataset)}"
         f" ({100. * correct / len(test_loader.dataset):.0f}%)\n")
-    return correct
+    if return_loss:
+        return correct, test_loss
+    else:
+        return correct
