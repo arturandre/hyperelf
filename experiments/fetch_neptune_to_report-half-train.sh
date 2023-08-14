@@ -12,4 +12,5 @@ script_full_path=$(dirname "$0")
 nohup python ${script_full_path}/fetch_neptune_to_report.py \
 "HYPER-" \
 "636-649" \
---suffix "half" &
+--suffix "half" \
+--output-folder /scratch/arturao/hyperelf/outputs/fetch_neptune/ &

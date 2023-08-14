@@ -3,6 +3,7 @@ import neptune.new as neptune
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 
 def get_experiment_data(neptune_exp_id):
     #with_id="HYPER-457")
@@ -61,7 +62,7 @@ def exp_data_to_latex_tabular_row(exp_data, bold_test=False):
     )
     return tab_row
 
-def exp_dataframe_to_graphs(exp_df, suffix=""):
+def exp_dataframe_to_graphs(exp_df, suffix="", output_folder=""):
     # Removed vs Positive vs Negative
     # No early exit
     # Across architectures
@@ -124,7 +125,7 @@ def exp_dataframe_to_graphs(exp_df, suffix=""):
         ax.bar_label(rect, padding=3, rotation="vertical")
     ax.set_ylim((0,110))
     fig.tight_layout()
-    plt.savefig(f"report_noelyx{suffix}.png")
+    plt.savefig(os.path.join(output_folder, f"report_noelyx{suffix}.png"))
     plt.close()
     ###
     # Early exit vs Non-Early exit
@@ -174,9 +175,15 @@ if __name__ == "__main__":
     parser.add_argument('intervals', default=[], 
         help="Comma separated sequence of intervals, for example: 2-4,6-8,17,21 will include the experiments 2,3,4,6,7,8,17,21.")
     parser.add_argument('--suffix', help="(optional) Suffix for the output files.")
+    parser.add_argument('--output-folder', help="(optional) Folder to save the output files.")
     args = parser.parse_args()
     intervals = args.intervals.split(",")
     suffix = "" if args.suffix is None else f"_{args.suffix}"
+    output_folder = args.output_folder
+    if output_folder is not None:
+        os.makedirs(output_folder)
+    else:
+        output_folder = ""
     df = pd.DataFrame()
     for interval in intervals:
         if "-" in interval:
@@ -191,9 +198,9 @@ if __name__ == "__main__":
             exp_data = get_experiment_data(f"{args.prefix}{i}")
             df_dict = pd.DataFrame([exp_data])
             df = pd.concat([df, df_dict], ignore_index=True)
-    with open(f"report{suffix}.csv", "w") as report:
+    with open(os.path.join(output_folder, f"report{suffix}.csv"), "w") as report:
         df = df.sort_values(["model_name", "label_mode", "elyx"], ascending=False)
-        exp_dataframe_to_graphs(df, suffix=suffix)
+        exp_dataframe_to_graphs(df, suffix=suffix, output_folder=output_folder)
         max_test_idx = df.loc[:, "test_max_acc"].idxmax()
         for idx in df.index:
             tab_row = exp_data_to_latex_tabular_row(df.loc[idx, :].values, bold_test=idx==max_test_idx)

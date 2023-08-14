@@ -2,6 +2,7 @@
 Here we define a ResNet50 with early exits after each block.
 """
 
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,13 +19,22 @@ class ResNetElyx(nn.Module):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
         super(ResNetElyx, self).__init__()
         self.begin = None
-        self.original_model = base_model(pretrained=pretrained)
+
+        if use_timm:
+            self.original_model = timm.create_model(base_model,pretrained=pretrained)
+        else:
+            self.original_model = base_model(pretrained=pretrained)
         num_ftrs = self.original_model.fc.in_features
         #self.original_model.fc = nn.Linear(num_ftrs, num_classes)
-        self.classifier = nn.Linear(num_ftrs, num_classes)
+        if keep_head:
+            self.classifier = self.original_model.fc
+        else:
+            self.classifier = nn.Linear(num_ftrs, num_classes)
 
         # Only for backward compatibility
         self.original_model.fc = self.classifier
@@ -115,9 +125,14 @@ class ResNet152Elyx(ResNetElyx):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
 
-        original_model = models.resnet152
+        if use_timm:
+            original_model = 'resnet152.tv_in1k'
+        else:
+            original_model = models.resnet152
 
         output_numels_5 = [512]*8
         output_numels_6 = [1024]*36
@@ -137,7 +152,9 @@ class ResNet152Elyx(ResNetElyx):
             elyx_head=elyx_head,
             hold_exit=hold_exit,
             pretrained=pretrained,
-            device=device
+            keep_head=keep_head,
+            device=device,
+            use_timm=use_timm,
         )
 
         self.begin = nn.Sequential(*self.all_layers[:5])
@@ -162,9 +179,14 @@ class ResNet50Elyx(ResNetElyx):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device="cuda") -> None:
+        keep_head=False,
+        device="cuda",
+        use_timm=False) -> None:
 
-        original_model = models.resnet50
+        if use_timm:
+            original_model = 'resnet50.ra_in1k'
+        else:
+            original_model = models.resnet50
 
         output_numels = [256, 512, 1024]
 
@@ -177,7 +199,9 @@ class ResNet50Elyx(ResNetElyx):
             elyx_head=elyx_head,
             hold_exit=hold_exit,
             pretrained=pretrained,
-            device=device
+            keep_head=keep_head,
+            device=device,
+            use_timm=use_timm,
         )
 
         self.begin = nn.Sequential(*self.all_layers[:4])

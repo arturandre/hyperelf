@@ -100,7 +100,7 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def main_loop(rank, args, nlogger):
+def main_loop(rank, args, nlogger, nlogger_kwargs=None):
 
     ddp_kwargs = None
     world_size = None
@@ -111,6 +111,13 @@ def main_loop(rank, args, nlogger):
         world_size = args.world_size
         setup(rank, world_size)
         device = None
+        if nlogger == None and rank == 0:
+            nlogger = NeptuneLogger(
+            name=nlogger_kwargs['name'],
+            tags=nlogger_kwargs['tags'],
+            project=nlogger_kwargs['project'],
+            api_token=nlogger_kwargs['api_token'])
+            nlogger.setup_neptune(nlogger_kwargs['nparams'])
     else:
         device = "cuda" if use_cuda else "cpu"
     
@@ -120,21 +127,24 @@ def main_loop(rank, args, nlogger):
             'num_replicas': args.world_size,
         }
 
-    train_kwargs = {'batch_size': args.batch_size}
-    test_kwargs = {'batch_size': args.test_batch_size}
+    cweights = None
+    if args.cweights is not None:
+        cweights = [float(i) for i in args.cweights.split(",")]
+        cweights = torch.FloatTensor(cweights)
+
+
+    train_kwargs = {'batch_size': args.batch_size, 'shuffle': True}
+    test_kwargs = {'batch_size': args.test_batch_size, 'shuffle': True}
     if use_cuda:
         # cuda_kwargs = {'num_workers': 1,
         #                'pin_memory': True,
         #                'shuffle': True}
-        cuda_kwargs = {
-                       'pin_memory': True,
-                       'shuffle': True}
+        cuda_kwargs = {'pin_memory': True}
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    dataset_name = args.dataset_name
     num_classes, num_channels = \
-        get_dataset_info(dataset_name=dataset_name)
+        get_dataset_info(dataset_name=args.dataset_name)
 
     model, base_network_name = get_network(
         network_name=args.network_name,
@@ -158,6 +168,10 @@ def main_loop(rank, args, nlogger):
         custom_disagreement_threshold=args.custom_disagreement_threshold,
         ddp_kwargs=ddp_kwargs,
     )
+    if args.save_model is not None:
+        save_path = os.path.join(args.output_folder,
+            f"{args.save_model}.pt")
+
 
     if args.load_model is not None:
         # Workaround because the name of the classification head
@@ -166,6 +180,11 @@ def main_loop(rank, args, nlogger):
 
         #Loading the whole model
         model = torch.load(args.load_model)
+
+    if not args.use_fsdp:
+        model = model.to(device)
+        if cweights is not None:
+            cweights = cweights.to(device)
 
     if args.use_fsdp:
         torch.cuda.set_device(rank)
@@ -178,7 +197,6 @@ def main_loop(rank, args, nlogger):
             )
         print(f"FSDP parameters device: {next(model.parameters()).device}")
     elif args.use_ddp:
-        model = model.to(device)
         model = DDP(model, device_ids=[device])
         
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
@@ -186,6 +204,8 @@ def main_loop(rank, args, nlogger):
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     correct_test_max = -1
     for epoch in range(1, args.epochs + 1):
+        if only_create_pseudo_labels:
+            break
         if not args.only_test:
             if args.log_it_folder is not None:
                 raise Exception(
@@ -195,22 +215,35 @@ def main_loop(rank, args, nlogger):
                     for each training epoch a set of images would be
                     produced for each intermediate exit.
                     """)
-            train(args, model, device, train_loader, optimizer, epoch, nlogger=nlogger, use_fsdp=args.use_fsdp)
+            train(
+                args,
+                model,
+                device,
+                train_loader,
+                optimizer,
+                epoch,
+                cweights=cweights,
+                nlogger=nlogger,
+                use_fsdp=args.use_fsdp)
         
         correct_test, test_loss = test(
             model,
             device,
             test_loader,
+            args.dataset_name,
+            conf_matrix_output=
+                os.path.join(args.output_folder,
+                    "conf_mat_test.png"),
             nlogger=nlogger,
             log_it_folder=args.log_it_folder,
+            copy_images_to_it_folder=(not args.avoid_copy_images_it_folder),
             use_fsdp=args.use_fsdp,
-            return_loss=True)
+            return_loss=True,
+            loss_func=args.loss)
         if correct_test > correct_test_max \
             and (not args.only_test or args.force_save): 
             correct_test_max = correct_test
             if args.save_model is not None:
-                save_path = os.path.join(args.output_folder,
-                    f"{args.save_model}.pt")
                 if args.use_ddp:
                     if rank == 0:
                         torch.save({
@@ -219,9 +252,6 @@ def main_loop(rank, args, nlogger):
                             'optimizer_state_dict': optimizer.state_dict(),
                             'loss': test_loss,
                         }, save_path)
-                else:
-                    torch.save(model, save_path)
-                if args.use_ddp:
                     dist.barrier()
                     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
                     checkpoint = torch.load(save_path, map_location=map_location)
@@ -231,15 +261,76 @@ def main_loop(rank, args, nlogger):
                         checkpoint['model_state_dict'])
                     optimizer.load_state_dict(
                         checkpoint['optimizer_state_dict'])
-                
-                #torch.save(model.state_dict(), save_path)
-                #model_scripted = torch.jit.script(model)
-                #model_scripted.save(save_path)
+                else:
+                    torch.save(model, save_path)
         if args.only_test:
             break
         scheduler.step()
+    if args.create_pseudo_labels:
+        if args.save_model is not None:
+            # Best test model
+            model = torch.load(save_path)
+        elif args.load_model is not None:
+            # Loaded model
+            model = torch.load(args.load_model)
+        else:
+            # Last epoch trained model
+            pass
+        train_kwargs["shuffle"] = False
+        test_kwargs["shuffle"] = False
+        train_loader, test_loader =\
+            prepare_dataset(
+            dataset_name = args.dataset_name,
+            use_imagenet_stat = not args.from_scratch,
+            train_kwargs=train_kwargs,
+            test_kwargs=test_kwargs,
+            custom_disagreement_csv=args.custom_disagreement_csv,
+            custom_disagreement_threshold=args.custom_disagreement_threshold,
+            ddp_kwargs=None,
+        )
+        unbatched_train_raw_outputs = None
+        unbatched_train_onehot_outputs = None
+        unbatched_test_raw_outputs = None
+        unbatched_test_onehot_outputs = None
+        for i_loader, loader in enumerate([train_loader, test_loader]):
+            unbatched_output = None
+            for batch_idx, (data, *target) in enumerate(train_loader):
+                if len(target) == 1:
+                    target = target[0]
+                    image_names = None
+                elif len(target) == 2:
+                    # This is important when testing the Trees dataset
+                    image_names = target[1]
+                    target = target[0]
+                output, intermediate_outputs = model(data, gt=target)
+                if unbatched_output is None:
+                    unbatched_output = output.detach().cpu().numpy()
+                else:
+                    aux = output.detach().cpu().numpy()
+                    unbatched_output = np.stack([unbatched_output, aux])
 
-    if (not args.fsdp) and args.use_ddp:
+            # intermediate_outputs are being thrown away for now
+            if i_loader == 0: # train data
+                np.save(
+                    os.path.join(
+                    args.output_folder, "raw_train_outputs.npy"),
+                    unbatched_output)
+                np.save(
+                    os.path.join(
+                    args.output_folder, "categoric_train_outputs.npy"),
+                    unbatched_output.argmax(axis=-1))
+            elif i_loader == 1: # test data
+                np.save(
+                    os.path.join(
+                    args.output_folder, "raw_test_outputs.npy"),
+                    unbatched_output)
+                np.save(
+                    os.path.join(
+                    args.output_folder, "categoric_test_outputs.npy"),
+                    unbatched_output.argmax(axis=-1))
+        
+
+    if (not args.use_fsdp) and args.use_ddp:
         cleanup()
 
 def main():
@@ -280,6 +371,8 @@ def main():
                         help='Learning rate step gamma (default: 0.7)')
     parser.add_argument('--loss', type=str, default="nll",
                     help='Loss function. Options: "focal", "nll". Default: nll.')
+    parser.add_argument('--cweights', type=str,
+                    help='(Optional) class weights. E.g., for a problem with 4 classes: 0.1,0.2,0.3,0.4')
     parser.add_argument('--freeze-backbone', action='store_true',
                     help='Keep the backbone frozen. (Default: False).')
     parser.add_argument('--no-cuda', action='store_true', default=False,
@@ -289,7 +382,7 @@ def main():
     parser.add_argument('--keep-head', action='store_true', default=False,
                         help='Keeps the classification head instead of creating a new one. The head will have 1K classes from imagenet-1K.')
     parser.add_argument('--dry-run', action='store_true', default=False,
-                        help='quickly check a single pass')
+                        help='(Deprecated) quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
@@ -300,12 +393,30 @@ def main():
                         help='If a name is provided then it loads a model saved with this name.')
     parser.add_argument('--only-test', action='store_true', default=False,
                         help='For running a previously saved model without fine-tuning it.')
+    parser.add_argument('--only-create-pseudo-labels', action='store_true', default=False,
+                        help=(
+                            'For running a previously saved model without fine-tuning '
+                            'and testing it. Implies --create-pseudo-labels and ignores --only-test.'))
+    parser.add_argument('--create-pseudo-labels', action='store_true', default=False,
+                        help=
+                        (
+                        'Creates pseudo-labels and stores at the output folder.'
+                        'If --save-model is provided, then the model with the best '
+                        'val/test accuracy will be loaded by the end of training '
+                        'to create the pseudo-labels. If --save-model is not '
+                        'provided, but --load-model is, then the loaded model '
+                        'will be used instead. If neither --save-model nor '
+                        '--load-model are provided then the model at the last '
+                        'training epoch will be used.'
+                        ))
     parser.add_argument('--force-save', action='store_true', default=False,
                         help='Used in conjunction with --only-test to allow for saving the tested model (may cause overwriting!).')
     parser.add_argument('--silence', action='store_true', default=False,
                         help='Disables tqdm progress bars.')
     parser.add_argument('--log-it-folder', type=str,
                         help='For saving intermediate exited logs and images. Should be used with --only-test.')
+    parser.add_argument('--avoid-copy-images-it-folder', action='store_true', default=False,
+                        help='Avoid copying the dataset to the it folder separating images per early exit. Only used if --log-it-folder is used.')
     parser.add_argument('--log-file', type=str,
                         help='Log file name.')
     parser.add_argument('--output-folder', type=str,
@@ -322,6 +433,9 @@ def main():
     if args.project_tags is not None:
         project_tags += args.project_tags.split(",")
     
+    if args.only_create_pseudo_labels:
+        args.create_pseudo_labels = True
+
     if args.use_fsdp:
         args.use_ddp = True
 
@@ -330,6 +444,7 @@ def main():
 
     model_name = f"{args.network_name}{args.elyx_head}"
     nparams = {
+    'loss': args.loss,
     'lr': args.lr,
     'train_bs': args.batch_size,
     'test_bs': args.test_batch_size,
@@ -337,8 +452,12 @@ def main():
     'gamma': args.gamma,
     "optimizer": "Adadelta",
     "basemodel_pretrained": str(not args.from_scratch),
+    "freze_backbone": args.freeze_backbone,
     "use_imagenet_stat": str(not args.from_scratch),
     "model": f"{model_name}",
+    "save_model": f"{args.save_model}",
+    "load_model": f"{args.load_model}",
+    "create_pseudo_labels": f"{args.create_pseudo_labels}",
     }
 
     root_logger= logging.getLogger()
@@ -347,10 +466,30 @@ def main():
         os.path.join(args.output_folder, args.log_file), 'w', 'utf-8')
     root_logger.addHandler(handler)
 
+    if args.create_pseudo_labels:
+        if args.use_ddp:
+            raise print("Warning: When generating pseudo-labels ddp will be disabled.")
+        if args.dataset_name in [
+            "ImageNet2012Half",
+            "ImageNet2012HalfValid"]:
+            raise NotImplementedError(
+                f"The selected dataset {args.dataset_name} "
+                f"uses a random subset sampler, thus the "
+                f"order of produced pseudo labels is not "
+                f"guaranteed to be kept."
+                )
     if args.use_ddp:
-        nlogger = PrintLogger(name=args.exp_name + ".out")
+        #nlogger = PrintLogger(name=args.exp_name + ".out")
+        nlogger = None
+        nlogger_kwargs = {
+            'name': args.exp_name,
+            'tags': project_tags,
+            'project': args.nep_project,
+            'api_token': args.nep_api_token,
+            'nparams': nparams
+                }
         mp.spawn(main_loop,
-            args=(args, nlogger,),
+            args=(args, nlogger, nlogger_kwargs,),
             nprocs=args.world_size,
             join=True
             )

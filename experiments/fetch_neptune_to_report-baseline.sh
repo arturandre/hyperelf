@@ -10,5 +10,6 @@ script_full_path=$(dirname "$0")
 
 nohup python ${script_full_path}/fetch_neptune_to_report.py \
 "HYPER-" \
-"440-457,612-635" \
---suffix "baseline" &
+"440-457,612-635,920-925" \
+--suffix "baseline" \
+--output-folder /scratch/arturao/hyperelf/outputs/fetch_neptune/ &

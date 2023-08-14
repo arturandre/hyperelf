@@ -20,7 +20,9 @@ class EfficientNetElyx(BackboneElyx):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
         super(EfficientNetElyx, self).__init__(
             base_model=base_model,
             num_channels=num_channels,
@@ -30,14 +32,19 @@ class EfficientNetElyx(BackboneElyx):
             elyx_head = elyx_head,
             hold_exit = hold_exit,
             pretrained=pretrained,
-            device=device
+            device=device,
+            use_timm=use_timm
             )
-        num_ftrs = 1280
-        #self.original_model.fc = nn.Linear(num_ftrs, num_classes)
-        self.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),
-            nn.Linear(num_ftrs, num_classes)
-        )
+        
+        if keep_head:
+            self.classifier = self.all_layers[2]
+        else:
+            num_ftrs = 1280
+            #self.original_model.fc = nn.Linear(num_ftrs, num_classes)
+            self.classifier = nn.Sequential(
+                nn.Dropout(p=0.2, inplace=True),
+                nn.Linear(num_ftrs, num_classes)
+            )
         #self.original_model = self.original_model.to(device)
 
 class EfficientNetB0Elyx(EfficientNetElyx):
@@ -50,7 +57,9 @@ class EfficientNetB0Elyx(EfficientNetElyx):
         elyx_head = "2",
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
 
         elyx_head = str(elyx_head) # Just for backward-compatibility
         output_numels = []
@@ -65,7 +74,10 @@ class EfficientNetB0Elyx(EfficientNetElyx):
             else:
                 raise Exception("Invalid Elyx Head! Only 1, 2, 3, and mobnetv3l are available.")
 
-        original_model = models.efficientnet_b0
+        if use_timm:
+            original_model = 'efficientnet_b0.ra_in1k'
+        else:
+            original_model = models.efficientnet_b0
 
         super(EfficientNetB0Elyx, self).__init__(
             base_model=original_model,
@@ -76,7 +88,9 @@ class EfficientNetB0Elyx(EfficientNetElyx):
             elyx_head = elyx_head,
             hold_exit = hold_exit,
             pretrained=pretrained,
-            device=device)
+            keep_head=keep_head,
+            device=device,
+            use_timm=use_timm)
 
         # Based on the DenseNet forward pass implementation
         # Ref: https://pytorch.org/vision/stable/_modules/torchvision/models/densenet.html#densenet121

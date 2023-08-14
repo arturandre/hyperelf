@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from networks.elyx_head import ElyxHead, ElyxHead2, ElyxHead3, ElyxHeadMobNetV3Large
-from torchvision.models import mobilenet_v3_large
+from torchvision import models
 
 class MobileNetV3Large(nn.Module):
     def __init__(
@@ -17,24 +17,34 @@ class MobileNetV3Large(nn.Module):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
         super(MobileNetV3Large, self).__init__()
         self.begin = None
-        self.original_model = base_model(pretrained=pretrained)
-        # Values observed in the debugger
-        dropout = 0.2
-        inftrs = 960
-        output_channel=1280
-        self.classifier = nn.Sequential(
-            nn.Linear(inftrs, output_channel),
-            nn.Hardswish(),
-            nn.Dropout(dropout),
-            nn.Linear(output_channel, num_classes),
-        )
+        if use_timm:
+            self.original_model = timm.create_model(base_model,pretrained=pretrained)
+        else:
+            self.original_model = base_model(pretrained=pretrained)
         self.original_model.to(device)
 
         self.features = nn.Sequential(*list(self.original_model.children()))
         self.all_layers = list(self.original_model.children())
+
+        # Values observed in the debugger
+        if keep_head:
+            self.classifier = self.all_layers[2]
+        else:
+            dropout = 0.2
+            inftrs = 960
+            output_channel=1280
+            self.classifier = nn.Sequential(
+                nn.Linear(inftrs, output_channel),
+                nn.Hardswish(),
+                nn.Dropout(dropout),
+                nn.Linear(output_channel, num_classes),
+            )
+
         self.num_classes = num_classes
         self.early_exit_criteria = early_exit_criteria
         self.last_exit = 0
@@ -121,7 +131,9 @@ class MobileNetV3LargeElyx(MobileNetV3Large):
         elyx_head = "mobnet3l",
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
 
         elyx_head = str(elyx_head) # Just for backward-compatibility
         output_numels = []
@@ -140,7 +152,10 @@ class MobileNetV3LargeElyx(MobileNetV3Large):
             else:
                 raise Exception("Invalid Elyx Head! Only 1, 2, 3, and mobnetv3l are available.")
 
-        original_model = mobilenet_v3_large
+        if use_timm:
+            original_model = 'mobilenetv3_large_100.ra_in1k'
+        else:
+            original_model = models.mobilenet_v3_large
 
         super(MobileNetV3LargeElyx, self).__init__(
             base_model=original_model,
@@ -151,7 +166,9 @@ class MobileNetV3LargeElyx(MobileNetV3Large):
             elyx_head = elyx_head,
             hold_exit = hold_exit,
             pretrained=pretrained,
-            device=device)
+            keep_head=keep_head,
+            device=device,
+            use_timm=use_timm)
 
         self.adapool2d = self.all_layers[1]
 

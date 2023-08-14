@@ -37,7 +37,7 @@ if __name__ == "__main__":
     parser.add_argument('--output-path', type=str,
                         help='(optional) Defines where to create the reports.')
     parser.add_argument('--dataset-name-clean', type=str,
-        help='The clean dataset')
+        help='(Optional) The clean dataset')
     parser.add_argument('--dataset-name-unknown', type=str,
         help='The unknown dataset')
     parser.add_argument('--no-cuda', action='store_true', default=False,
@@ -93,13 +93,16 @@ if __name__ == "__main__":
     # Store the predicted labels
     ## In a dataframe containing the ImageName as index,
     ## and each column has predictions for a given network
-    train_loader_clean, test_loader_clean =\
-        prepare_dataset(
-        dataset_name = dataset_name_clean, # from summanTrain
-        use_imagenet_stat = True,
-        train_kwargs=train_kwargs,
-        test_kwargs=test_kwargs,
-    )
+    if dataset_name_clean is not None:
+        train_loader_clean, test_loader_clean =\
+            prepare_dataset(
+            dataset_name = dataset_name_clean, # from summanTrain
+            use_imagenet_stat = True,
+            train_kwargs=train_kwargs,
+            test_kwargs=test_kwargs,
+        )
+    else:
+        train_loader_clean = test_loader_clean = None
     train_loader_unknown, test_loader_unknown =\
         prepare_dataset(
         dataset_name = dataset_name_unknown, # from summanTrain too (but with labelmode="unknown")
@@ -126,10 +129,13 @@ if __name__ == "__main__":
         ("no_unknown", test_loader_clean),
         ("unknown", test_loader_unknown)
     ]
-    train_datasets = [
-            ("no_unknown", train_loader_clean),
-            ("unknown", train_loader_unknown)
-        ]
+    if (train_loader_clean is not None) or (train_loader_unknown is not None):
+        train_datasets = [
+                ("no_unknown", train_loader_clean),
+                ("unknown", train_loader_unknown)
+            ]
+    else:
+        train_datasets = None
     for expname in expnames:
         index_start = 0
         fullpath = os.path.join(basepath, expname)
@@ -151,12 +157,17 @@ if __name__ == "__main__":
                 ["train", "test"],
                 [train_datasets, test_datasets]
             ):
+                if dataset_stage is None:
+                    combined_df[stage_name] = None
+                    continue
                 if os.path.exists(os.path.join(outpath, f'report_disagreements_{stage_name}.csv')):
                     combined_df[stage_name] = pd.read_csv(os.path.join(outpath, f'report_disagreements_{stage_name}.csv'))
                     combined_df[stage_name] = combined_df[stage_name].set_index('images')
                     combined_loaded = True
                     continue
                 for dataset_name, datasets in dataset_stage:
+                    if datasets is None:
+                        continue
                     all_names = []
                     all_preds = None
                     all_labels = None
@@ -200,15 +211,14 @@ if __name__ == "__main__":
                 if combined_df[stage_name] is None:
                     combined_df[stage_name] = exp_df[stage_name]
                 else:
-                    combined_df[stage_name] = pd.concat([combined_df[stage_name], exp_df[stage_name].loc[:, expname]],
-                        axis=1, join='inner')
+                    #combined_df[stage_name] = pd.concat([combined_df[stage_name], exp_df[stage_name].loc[:, expname]],
+                    #    axis=1, join='inner')
+                    combined_df[stage_name][expname] = exp_df[stage_name][expname]
     for stage_name in ["train", "test"]:
-    #for stage_name in ["test"]:
-        #if combined_loaded:
-        #    break
-        #combined_df[stage_name].loc[:, "disagreement"] = combined_df[stage_name].loc[:, expnames].sum(axis=1)/len(expnames)
         # AC - # Agreements complement (total - max agreements)
         # DL - # Disagreement Levels (max agreement/number of decisions)
+        if combined_df[stage_name] is None:
+            continue
         ACs = []
         DLs = []
         for row in combined_df[stage_name].loc[:, expnames].values:
@@ -332,34 +342,40 @@ if __name__ == "__main__":
         unanimous = (combined_df[stage_name].loc[:, "disagreement"]%1).values == 0
         clean = (combined_df[stage_name].loc[:, "dataset_name"] == "no_unknown").values
         clean_d = combined_df[stage_name][clean].loc[:, "disagreement"]
-        nbins = int(np.ceil((len(expnames)+1)/2))
-        hist, edges = np.histogram(clean_d, bins=nbins)
+        nbins = int(np.ceil((len(expnames))))
         bin_centers = ([i/(nbins) for i in range(nbins)])
-        bars = plt.bar(bin_centers, 100*hist/hist.sum(), width=1/(nbins*2))
-        plt.bar_label(bars, labels=[f"{i:.2f}%" for i in 100*hist/hist.sum()])
-        plt.xticks(bin_centers, [f"{i}/{len(expnames)}" \
-            for i in range((nbins))], rotation='vertical')
-        #plt.xlabel("Positive / Negative votes")
-        plt.xlabel("Disagreement Level")
-        plt.ylabel("Percentage of images (%)")
-        plt.title("Disagreement Levels for clean images")
-        plt.tight_layout()
-        plt.savefig(os.path.join(outpath, f"report_disagreements_clean_hist_{stage_name}.png"))
-        plt.close()
+        if len(clean_d) > 0:
+            #nbins = int(np.ceil((len(expnames)+1)/2))
+            hist, edges = np.histogram(clean_d, bins=nbins)
+            bars = plt.bar(bin_centers, 100*hist/hist.sum(), width=1/(nbins*2))
+            plt.bar_label(bars, labels=[f"{i:.2f}%" for i in 100*hist/hist.sum()])
+            plt.xticks(bin_centers, [f"{i}/{len(expnames)}" \
+                for i in range((nbins))], rotation='vertical')
+            #plt.xlabel("Positive / Negative votes")
+            plt.xlabel("Disagreement Level")
+            plt.ylabel("Percentage of images (%)")
+            plt.title("Disagreement Levels for clean images")
+            plt.tight_layout()
+            plt.savefig(os.path.join(outpath, f"report_disagreements_clean_hist_{stage_name}.png"))
+            plt.close()
+        else:
+            print("No clean images!")
 
         unknown_d = combined_df[stage_name][~clean].loc[:, "disagreement"]
-        hist, edges = np.histogram(unknown_d, bins=nbins)
-        bin_centers = ([i/(nbins) for i in range(nbins)])
-        bars = plt.bar(bin_centers, 100*hist/hist.sum(), width=1/(nbins*2))
-        plt.bar_label(bars, labels=[f"{i:.2f}%" for i in 100*hist/hist.sum()])
-        plt.xticks(bin_centers, [f"{i}/{len(expnames)}" \
-            for i in range((nbins))], rotation='vertical')
-        plt.xlabel("Disagreement Level")
-        plt.ylabel("Percentage of images (%)")  
-        plt.title("Disagreement Levels for unknown images")
-        plt.tight_layout()
-        plt.savefig(os.path.join(outpath, f"report_disagreements_unknown_hist_{stage_name}.png"))
-        plt.close()
+        if len(unknown_d) > 0:
+            hist, edges = np.histogram(unknown_d, bins=nbins)
+            bars = plt.bar(bin_centers, 100*hist/hist.sum(), width=1/(nbins*2))
+            plt.bar_label(bars, labels=[f"{i:.2f}%" for i in 100*hist/hist.sum()])
+            plt.xticks(bin_centers, [f"{i}/{len(expnames)}" \
+                for i in range((nbins))], rotation='vertical')
+            plt.xlabel("Disagreement Level")
+            plt.ylabel("Percentage of images (%)")  
+            plt.title("Disagreement Levels for unknown images")
+            plt.tight_layout()
+            plt.savefig(os.path.join(outpath, f"report_disagreements_unknown_hist_{stage_name}.png"))
+            plt.close()
+        else:
+            print("No unknown images!")
 
         with open(os.path.join(outpath, f"report_disagreements_{stage_name}.txt"), "w") as f:
             f.write(f"Input arguments: {args}\n\n")

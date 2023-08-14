@@ -72,6 +72,26 @@ class TreesDataset(Dataset):
             self.dataframe.loc[idx, 'Intersection'] = -1
             idx = self.dataframe[self.dataframe['Intersection'] == -1].index
             self.dataframe.loc[idx, 'Intersection'] = 0  #Negatives still negatives
+        elif label_mode == 'outlier_4':
+            # Now images have 4 labels
+            # 1 positive, 1 challenging, and 2 negatives
+            # one negative with trees and one without.
+            posidx = self.dataframe[self.dataframe['Intersection'] == 1].index
+            unkownidx = self.dataframe[self.dataframe['Intersection'] == 0].index
+            neg_treeidx = self.dataframe[
+                (self.dataframe['Intersection'] == -1)
+                &
+                (self.dataframe['Tree'] == 1)
+                ].index
+            neg_no_treeidx = self.dataframe[
+                (self.dataframe['Intersection'] == -1)
+                &
+                (self.dataframe['Tree'] != 1)
+                ].index
+            self.dataframe.loc[posidx, 'Intersection'] = 0
+            self.dataframe.loc[unkownidx, 'Intersection'] = 1
+            self.dataframe.loc[neg_treeidx, 'Intersection'] = 2
+            self.dataframe.loc[neg_no_treeidx, 'Intersection'] = 3
             
 
     def __getitem__(self, idx):
@@ -185,6 +205,12 @@ def get_dataset_info(dataset_name):
         num_classes = 2
         num_channels = 3
     elif dataset_name in [
+        "TreesLocating",
+        "TreesLocatingTest3k"
+        ]:
+        num_classes = 4
+        num_channels = 3
+    elif dataset_name in [
         "MNIST",
         "MNISTCustom",
         "MNISTHalf",
@@ -234,8 +260,6 @@ def prepare_dataset(
     if use_imagenet_stat:
         t_list.append(transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
     transform=transforms.Compose(t_list)
-    #else:
-    #    raise Exception("base network not implemented in dataset.py at prepare_dataset!")
     train_loader = None
     test_loader = None
     if dataset_name == "STL10":
@@ -519,7 +543,8 @@ def prepare_dataset(
         "TreesNoUnknown","TreesUnknownPositive", "TreesUnknownNegative",
         "TreesCustomNoUnknown","TreesCustomUnknownPositive", "TreesCustomUnknownNegative",
         "TreesUnknownTestRev", "TreesNoUnknownRev",
-        "TreesDetecting", "TreesTrainDetecting", "TreesTestDetecting"
+        "TreesDetecting", "TreesTrainDetecting", "TreesTestDetecting",
+        "TreesLocating", "TreesLocatingTest3k"
         ]:
         tree_train_kwargs = {
             "images_path": data_folder['trees'],
@@ -532,13 +557,29 @@ def prepare_dataset(
             # In the Detecting's summan there are only
             # binary (0/1) labels, and 0 is negative, not unknown.
             tree_train_kwargs["label_mode"] = "unknown_negative"
-            tree_test_kwargs["label_mode"] = "unknown_negative"
             tree_train_kwargs["summan_path"] = data_folder['summanTrainDetecting']
+            tree_test_kwargs["label_mode"] = "unknown_negative"
             tree_test_kwargs["summan_path"] = data_folder['summanTestDetecting']
+        if dataset_name in [
+            "TreesLocating",
+            "TreesLocatingTest3k"
+            ]:
+            # In the Detecting's summan there are only
+            # binary (0/1) labels, and 0 is negative, not unknown.
+            tree_train_kwargs["label_mode"] = "outlier_4"
+            tree_train_kwargs["summan_path"] = data_folder['summanTrain']
+            tree_test_kwargs["label_mode"] = "outlier_4"
+            tree_test_kwargs["summan_path"] = data_folder['summanTest']
+            if dataset_name in ["TreesLocatingTest3k"]:
+                tree_test_kwargs["summan_path"] = data_folder['summanTest3k']
+
         if dataset_name in ["TreesTrainDetecting"]:
+            # This doesn't change anything
             tree_train_kwargs["summan_path"] = data_folder['summanTrainDetecting']
             tree_train_kwargs["label_mode"] = "unknown_negative"
         if dataset_name in ["TreesTestDetecting"]:
+            # Here we train in the new dataset (from the Locating paper)
+            # and test on the old dataset (from Detecting paper)
             tree_train_kwargs["summan_path"] = data_folder['summanTrain']
             tree_test_kwargs["summan_path"] = data_folder['summanTestDetecting']
             tree_test_kwargs["label_mode"] = "unknown_negative"

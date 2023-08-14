@@ -1,6 +1,7 @@
 """
 """
 
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,28 +18,34 @@ class VGGElyx(nn.Module):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
         super(VGGElyx, self).__init__()
         self.begin = None
-        self.original_model = base_model(pretrained=pretrained)
-
-        dropout = 0.5
-        inftrs = 25088
-        output_channel=4096
-        self.classifier = nn.Sequential(
-            nn.Linear(inftrs, output_channel),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(output_channel, output_channel),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(output_channel, num_classes),
-        )
-
         
+        if use_timm:
+            self.original_model = timm.create_model(base_model,pretrained=pretrained)
+        else:
+            self.original_model = base_model(pretrained=pretrained)
 
         #self.features = nn.Sequential(*list(self.original_model.children()))
         self.all_layers = list(self.original_model.children())
+        if keep_head:
+            self.classifier = self.all_layers[2]
+        else:
+            dropout = 0.5
+            inftrs = 25088
+            output_channel=4096
+            self.classifier = nn.Sequential(
+                nn.Linear(inftrs, output_channel),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(output_channel, output_channel),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(output_channel, num_classes),
+            )
         self.num_classes = num_classes
         self.early_exit_criteria = early_exit_criteria
         self.last_exit = 0
@@ -121,9 +128,14 @@ class VGG19Elyx(VGGElyx):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
 
-        original_model = models.vgg19
+        if use_timm:
+            original_model = 'vgg19.tv_in1k'
+        else:
+            original_model = models.vgg19
 
         
 
@@ -140,7 +152,9 @@ class VGG19Elyx(VGGElyx):
             elyx_head=elyx_head,
             hold_exit=hold_exit,
             pretrained=pretrained,
-            device=device
+            keep_head=keep_head,
+            device=device,
+            use_timm=use_timm
         )
 
         self.begin = None
@@ -174,9 +188,15 @@ class VGG16Elyx(VGGElyx):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        keep_head=False,
+        device='cuda',
+        use_timm=False) -> None:
 
-        original_model = models.vgg16
+        if use_timm:
+            original_model = 'vgg16.tv_in1k'
+        else:
+            original_model = models.vgg16
+
 
         
 
@@ -193,7 +213,9 @@ class VGG16Elyx(VGGElyx):
             elyx_head=elyx_head,
             hold_exit=hold_exit,
             pretrained=pretrained,
-            device=device
+            keep_head=keep_head,
+            device=device,
+            use_timm=use_timm
         )
 
         self.begin = None

@@ -2,10 +2,12 @@
 Here we define a ResNet50 with early exits after each block.
 """
 
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+
 
 from networks.elyx_head import ElyxHead, ElyxHead2
 
@@ -18,11 +20,21 @@ class BackboneElyx(nn.Module):
         elyx_head = 1,
         hold_exit = False,
         pretrained=True,
-        device='cuda') -> None:
+        device='cuda',
+        use_timm=False) -> None:
         super(BackboneElyx, self).__init__()
         self.begin = None
         self.classifier = None
-        self.original_model = base_model(pretrained=pretrained)
+
+        if use_timm:
+            self.original_model = timm.create_model(base_model,pretrained=pretrained)
+        else:
+            if pretrained:
+                #self.original_model = base_model(pretrained=pretrained)
+                self.original_model = base_model(weights="IMAGENET1K_V2")
+            else:
+                self.original_model = base_model(weights=None)
+        
 
         #self.features = nn.Sequential(*list(self.original_model.children()))
         self.all_layers = list(self.original_model.children())
@@ -92,8 +104,12 @@ class BackboneElyx(nn.Module):
 
         for layer in self.layers[len(self.exits):]:
             x = layer(x)
-        if self.adapool2d is not None:
-            x = self.adapool2d(x)
+        
+        try:
+            if self.adapool2d is not None:
+                x = self.adapool2d(x)
+        except AttributeError:
+            self.adapool2d = None
         x = x.view(x.shape[0], -1)
         x = self.classifier(x)
         output = F.log_softmax(x, dim=1)

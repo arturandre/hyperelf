@@ -3,8 +3,14 @@ import torch
 import torch.nn.functional as F
 from torchvision.utils import save_image
 from timeit import default_timer as timer
+
+from sklearn.metrics import confusion_matrix
+
 from utils.neptune_logger import NeptuneLogger
 from utils.iteration_criterion import shannon_entropy, EntropyCriterion
+from utils.confusion_matrix_logger import save_conf_matrix_plot
+from utils.dataset import get_dataset_info
+
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
@@ -13,7 +19,16 @@ from train.focal_loss import FocalLoss
 
 bar_width = 0.5
 
-def train(args, model, device, train_loader, optimizer, epoch, nlogger, use_fsdp=False):
+def train(
+    args,
+    model,
+    device,
+    train_loader,
+    optimizer,
+    epoch,
+    nlogger,
+    cweights=None,
+    use_fsdp=False):
     model.train()
     start = timer()
     epoch_loss = 0
@@ -24,15 +39,16 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger, use_fsdp
     print(f"test nlogger: {nlogger}")
     try:
         if args.loss == 'nll':
-            loss_func = F.nll_loss
+            loss_func = torch.nn.NLLLoss(weight=cweights)
         elif args.loss == 'focal':
-            loss_func = FocalLoss()
+            #loss_func = FocalLoss(weight=cweights, reduction='sum')
+            loss_func = FocalLoss(weight=cweights)
         else:
             print(f"args.loss not found: {args.loss}. Using nll_loss.")
-            loss_func = F.nll_loss
+            loss_func = torch.nn.NLLLoss(weight=cweights)
     except:
         print("args.loss error. Using nll_loss.")
-        loss_func = F.nll_loss
+        loss_func = torch.nn.NLLLoss(weight=cweights)
 
 
     for batch_idx, (data, *target) in enumerate(train_loader):
@@ -51,7 +67,12 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger, use_fsdp
         end = timer()
         train_batch_time = end-start
         if nlogger is not None:
-            nlogger.log_train_batch_time(end-start)
+            if use_fsdp:
+                if (device is None or device == 0):
+                    nlogger.log_train_batch_time(end-start)
+            else:
+                nlogger.log_train_batch_time(end-start)
+
         output = output.to(target.device)
         loss = loss_func(output, target)
         epoch_loss += loss
@@ -67,7 +88,11 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger, use_fsdp
             else:
                 it_epoch_entropy[i] += it_entropy*len(it_out)
         if nlogger is not None:
-            nlogger.log_train_batch_it_entropy(it_batch_entropy)
+            if use_fsdp:
+                if (device is None or device == 0):
+                    nlogger.log_train_batch_it_entropy(it_batch_entropy)
+            else:
+                nlogger.log_train_batch_it_entropy(it_batch_entropy)
         
 
         loss = loss/(len(intermediate_outputs)+1)
@@ -79,8 +104,14 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger, use_fsdp
         entropy = shannon_entropy(output)
         epoch_entropy += entropy*len(output)
         if nlogger is not None:
-            nlogger.log_train_batch_correct(batch_correct/len(target))
-            nlogger.log_train_batch_entropy(entropy)
+            if use_fsdp:
+                if (device is None or device == 0):
+                    nlogger.log_train_batch_correct(batch_correct/len(target))
+                    nlogger.log_train_batch_entropy(entropy)
+            else:
+                nlogger.log_train_batch_correct(batch_correct/len(target))
+                nlogger.log_train_batch_entropy(entropy)
+
         if batch_idx % args.log_interval == 0:
             print(
                 (f"Train Epoch: {epoch} ",
@@ -102,20 +133,38 @@ def train(args, model, device, train_loader, optimizer, epoch, nlogger, use_fsdp
                 break
     end_epoch = timer()
     if nlogger is not None:
-        nlogger.log_train_time(end_epoch-start_epoch)
+        if use_fsdp:
+            if (device is None or device == 0):
+                nlogger.log_train_time(end_epoch-start_epoch)
+        else:
+            nlogger.log_train_time(end_epoch-start_epoch)
+
     epoch_entropy /= len(train_loader.dataset)
     it_epoch_entropy = list(it_epoch_entropy.values())
     for i in range(len(it_epoch_entropy)):
         it_epoch_entropy[i] /= len(train_loader.dataset)
     if nlogger is not None:
-        nlogger.log_train_entropy(epoch_entropy)
-        nlogger.log_train_it_entropy(it_epoch_entropy)
-        nlogger.log_train_correct(correct/len(train_loader.dataset))
+        if use_fsdp:
+            if (device is None or device == 0):
+                nlogger.log_train_entropy(epoch_entropy)
+                nlogger.log_train_it_entropy(it_epoch_entropy)
+                nlogger.log_train_correct(correct/len(train_loader.dataset))
+        else:
+            nlogger.log_train_entropy(epoch_entropy)
+            nlogger.log_train_it_entropy(it_epoch_entropy)
+            nlogger.log_train_correct(correct/len(train_loader.dataset))
 
 
 
-def log_it_data(log_it_folder, batch, last_exit, output,
-                intermediate_outputs, gt, image_names):
+def log_it_data(
+        log_it_folder,
+        batch,
+        last_exit,
+        output,
+        intermediate_outputs,
+        gt,
+        image_names,
+        copy_image_to_output=True):
     global bar_width
     last_exit = str(last_exit)
     exit_folder = os.path.join(log_it_folder, last_exit)
@@ -129,14 +178,17 @@ def log_it_data(log_it_folder, batch, last_exit, output,
 
     with open(exit_report_file, 'a') as f:
         for i in range(len(batch)):
-            image = batch[i]
+            if copy_image_to_output:
+                image = batch[i]
+                if image_names is not None:
+                    image_name = str(image_names[i])
+                save_image(image, os.path.join(exit_folder, f"{os.path.split(image_name)[-1]}.png"))
+
             image_prob = torch.nn.functional.softmax(output[i])
             image_gt = gt[i]
             image_pred = torch.argmax(image_prob)
             entropy = shannon_entropy(image_prob.unsqueeze(0), from_logits=False)
             correct = 1 if image_pred == image_gt else 0
-            if image_names is not None:
-                image_name = str(image_names[i])
             #probabilities plot
             #QuickRef: https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.bar.html
             x_axis = list(range(1, 1+len(image_prob)))
@@ -152,7 +204,6 @@ def log_it_data(log_it_folder, batch, last_exit, output,
             plt.close()
 
             f.write(f"{image_name}, {last_exit}, {entropy}, {image_gt}, {image_pred}, {correct}\n")
-            save_image(image, os.path.join(exit_folder, f"{os.path.split(image_name)[-1]}.png"))
             for j in range(len(intermediate_outputs)):
                 image_it_prob = torch.nn.functional.softmax(intermediate_outputs[j][i], dim=0)
                 image_it_pred = torch.argmax(image_it_prob)
@@ -180,10 +231,27 @@ def test(
     model,
     device,
     test_loader,
+    dataset_name,
+    conf_matrix_output,
     nlogger=None,
     log_it_folder=None,
+    copy_images_to_it_folder=True,
     use_fsdp=False,
-    return_loss=False):
+    return_loss=False,
+    loss_func="nll",
+    nclasses=None):
+    try:
+        if loss_func == 'nll':
+            loss_func = F.nll_loss
+        elif loss_func == 'focal':
+            loss_func = FocalLoss(reduction='sum')
+        else:
+            print(f"loss_func not found: {loss_func}. Using nll_loss.")
+            loss_func = F.nll_loss
+    except:
+        print("loss_func error. Using nll_loss.")
+        loss_func = F.nll_loss
+
     model.eval()
     test_loss = 0
     test_entropy = 0
@@ -192,6 +260,10 @@ def test(
     it_epoch_correct = {}
     start_epoch = timer()
     last_image_idx = 0
+    num_classes, num_channels = \
+        get_dataset_info(dataset_name=dataset_name)
+    labels_order = list(range(num_classes))[::-1]
+    conf_matrix = None
     print(f"test nlogger: {nlogger}")
     with torch.no_grad():
         for data, *target in tqdm(test_loader):
@@ -214,21 +286,41 @@ def test(
             end = timer()
             pred = output.argmax(dim=1, keepdim=True)
             if nlogger is not None:
-                nlogger.log_test_batch_time(end-start)
+                if use_fsdp:
+                    if (device is None or device == 0):
+                        nlogger.log_test_batch_time(end-start)
+                else:
+                    nlogger.log_test_batch_time(end-start)
             last_exit = model.get_last_exit()
             test_batch_entropy = shannon_entropy(output)
             test_entropy += test_batch_entropy*len(output)
             if nlogger is not None:
-                nlogger.log_test_last_exit(last_exit)
-                nlogger.log_test_batch_entropy(test_batch_entropy)
+                if use_fsdp:
+                    if (device is None or device == 0):
+                        nlogger.log_test_last_exit(last_exit)
+                        nlogger.log_test_batch_entropy(test_batch_entropy)
+                else:
+                    nlogger.log_test_last_exit(last_exit)
+                    nlogger.log_test_batch_entropy(test_batch_entropy)
+
 
             batch_it_entropies = []
             batch_it_corrects = []
             output = output.to(target.device)
-            test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
+            test_loss += loss_func(output, target, reduction='sum').item()  # sum up batch loss
+            numpy_targets = target.detach().cpu().numpy()
+            numpy_outputs = output.detach().cpu().numpy().argmax(axis=-1)
+            aux_conf_matrix = confusion_matrix(
+                numpy_targets,
+                numpy_outputs,
+                labels=labels_order)
+            if conf_matrix is None:
+                conf_matrix = aux_conf_matrix
+            else:
+                conf_matrix += aux_conf_matrix
             for i, it_out in enumerate(intermediate_outputs):
                 it_out = it_out.to(target.device)
-                it_loss = F.nll_loss(it_out, target, reduction='sum').item()
+                it_loss = loss_func(it_out, target, reduction='sum').item()
                 batch_it_entropy = shannon_entropy(it_out)
                 test_loss += it_loss
                 pred_it = it_out.argmax(dim=1, keepdim=True)
@@ -252,9 +344,16 @@ def test(
             pred = pred.to(target.device)
             batch_correct = pred.eq(target.view_as(pred)).sum().item()
             if nlogger is not None:
-                nlogger.log_test_batch_it_entropy(batch_it_entropies)
-                nlogger.log_test_batch_it_correct(batch_it_corrects)
-                nlogger.log_test_batch_correct(batch_correct/len(target))
+                if use_fsdp:
+                    if (device is None or device == 0):
+                        nlogger.log_test_batch_it_entropy(batch_it_entropies)
+                        nlogger.log_test_batch_it_correct(batch_it_corrects)
+                        nlogger.log_test_batch_correct(batch_correct/len(target))
+                else:
+                    nlogger.log_test_batch_it_entropy(batch_it_entropies)
+                    nlogger.log_test_batch_it_correct(batch_it_corrects)
+                    nlogger.log_test_batch_correct(batch_correct/len(target))
+
             
             correct += batch_correct
             print(
@@ -267,23 +366,43 @@ def test(
                 os.makedirs(log_it_folder, exist_ok=True)
                 if image_names is None:
                     image_names = list(range(last_image_idx, last_image_idx+len(data)))
-                log_it_data(log_it_folder, data, last_exit, output, intermediate_outputs, target, image_names=image_names)
+                log_it_data(
+                    log_it_folder,
+                    data,
+                    last_exit,
+                    output,
+                    intermediate_outputs,
+                    target,
+                    image_names=image_names,
+                    copy_image_to_output=copy_images_to_it_folder,)
                 last_image_idx += len(data)
     end_epoch = timer()
     if nlogger is not None:
-        nlogger.log_test_time(end_epoch-start_epoch)
-
+        if use_fsdp:
+            if (device is None or device == 0):
+                nlogger.log_test_time(end_epoch-start_epoch)
+        else:
+            nlogger.log_test_time(end_epoch-start_epoch)
+    
+    save_conf_matrix_plot(
+        conf_matrix_output,
+        conf_matrix,
+        labels_order)
     test_entropy /= len(test_loader.dataset)
     test_loss /= len(test_loader.dataset)
     it_epoch_entropy = list(it_epoch_entropy.values())
     for i in range(len(it_epoch_entropy)):
         it_epoch_entropy[i] /= len(test_loader.dataset)
     if nlogger is not None:
-        nlogger.log_test_entropy(test_entropy)
-        nlogger.log_test_it_entropy(it_epoch_entropy)
-        nlogger.log_test_correct(correct/len(test_loader.dataset))
-
-
+        if use_fsdp:
+            if (device is None or device == 0):
+                nlogger.log_test_entropy(test_entropy)
+                nlogger.log_test_it_entropy(it_epoch_entropy)
+                nlogger.log_test_correct(correct/len(test_loader.dataset))
+        else:
+            nlogger.log_test_entropy(test_entropy)
+            nlogger.log_test_it_entropy(it_epoch_entropy)
+            nlogger.log_test_correct(correct/len(test_loader.dataset))
     print(
         f"\nTest: Average loss: {test_loss:.4f}, "
         f"Average entropy: {test_batch_entropy:.4f}, "
