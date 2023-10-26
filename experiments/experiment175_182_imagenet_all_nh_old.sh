@@ -6,12 +6,13 @@
 script_name=$0
 script_full_path=$(dirname "$0")
 
-dbname="trees"
+dbname="imagenet2012"
 
-expnames=("exp190_4")
-networknames=("mobilenetv3trees")
-networknameselyx=("MobileNetV3LargeElyxTrees")
-datasetnames=("TreesLocatingTest3k")
+expnames=("exp181" "exp175" "exp176" "exp177" "exp178" "exp179" "exp180" "exp182" "exp182")
+networknames=("densenet161" "resnet50" "mobilenetv2" "mobilenetv3" "efficientnet" "vgg16" "densenet121" "resnet152" "resnet152")
+networknameselyx=("DenseNet161Elyx" "ResNet50Elyx" "MobileNetV2Elyx" "MobileNetV3LargeElyx" "EfficientNetB0Elyx" "VGG16Elyx" "DenseNet121Elyx" "ResNet152Elyx" "ResNet152Elyx")
+
+datasetnames=("ImageNet2012")
 elyxheads=("None" )
 suffixes=("nh")
 
@@ -28,19 +29,17 @@ for i in "${!expnames[@]}"; do
         --exp-name ${expname}${expnamesuffix} \
         --output-folder "/scratch/arturao/hyperelf/outputs/${expname}${expnamesuffix}" \
         --log-file "${expname}${expnamesuffix}_${dbname}_${networkname}.log" \
-        --only-create-pseudo-labels \
-        --create-pseudo-label-datasets "TreesUnlabed40k" \
-        --load-model "/scratch/arturao/hyperelf/outputs/exp190_4nh/exp190_4nh_trees_mobilenetv3.pt" \
+        --save-model "${expname}${expnamesuffix}_${dbname}_${networkname}" \
         --network-name "${networknameelyx}" \
         --project-tags "ResolutionResized" \
         --elyx-head "${elyxhead}" \
         --dataset-name "${datasetname}" \
-        --freeze-backbone \
-        --batch-size "1024" \
-        --test-batch-size "1024" \
-        --epochs "40" \
-        --loss "focal" \
-        --cweights "0.5,0.1,0.2,0.2" \
+        --batch-size "80" \
+        --test-batch-size "80" \
+        --from-scratch \
+        --epochs "1000" \
+        --patience "10" \
+        --loss "nll" \
         --lr "0.5" \
         --gamma "0.7" \
         --log-interval "10" \
@@ -51,4 +50,3 @@ done
 
 #        --custom-disagreement-csv "/scratch/arturao/hyperelf/outputs/disagreements-e68-74-nh/report_disagreements_train.csv" \
 #        --custom-disagreement-threshold "5" \
-        #--save-model "${expname}${expnamesuffix}_${dbname}_${networkname}" \

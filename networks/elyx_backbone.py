@@ -6,11 +6,23 @@ import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torchvision import models
 
 
 from networks.elyx_head import ElyxHead, ElyxHead2
 
+class ModuleWrapperIgnores2ndArg(nn.Module):
+    # Ref: https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x, dummy_arg=None):
+        assert dummy_arg is not None
+        x = self.module(x)
+        return x
+    
 class BackboneElyx(nn.Module):
     def __init__(
         self,

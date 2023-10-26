@@ -11,6 +11,7 @@ from networks.elyx_efficientnet import EfficientNetB0Elyx
 from networks.elyx_densenet import DenseNet121Elyx, DenseNet161Elyx
 from networks.elyx_vgg import VGG19Elyx, VGG16Elyx
 from networks.elyx_mobilenetv3 import MobileNetV3LargeElyx
+from networks.elyx_mobilenetv3_trees import MobileNetV3LargeElyxTrees
 from networks.elyx_mobilenetv2 import MobileNetV2Elyx
 from networks.elyx_resnet import ResNet50Elyx, ResNet152Elyx
 from utils.iteration_criterion import EntropyCriterion
@@ -49,6 +50,9 @@ def get_network(
     elif network_name == "MobileNetV3LargeElyx":
         model = MobileNetV3LargeElyx(**params)
         base_network_name = "mobilenetv3_large"
+    elif network_name == "MobileNetV3LargeElyxTrees":
+        model = MobileNetV3LargeElyxTrees(**params)
+        base_network_name = "mobilenetv3_large_trees"
     elif network_name == "VGG19Elyx":
         model = VGG19Elyx(**params)
         base_network_name = "vgg"

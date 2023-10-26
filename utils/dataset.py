@@ -1,8 +1,14 @@
+import random
 import pickle
 import torch
 from torch.utils.data import Dataset
+import torchvision  
 from torchvision import datasets, transforms
-from torch.utils.data.sampler import SubsetRandomSampler, SequentialSampler
+from torch.utils.data import ConcatDataset, Subset
+from torch.utils.data.sampler import (
+    SubsetRandomSampler, SequentialSampler
+    )
+from torchvision.transforms.functional import crop, InterpolationMode, adjust_sharpness
 from torch.utils.data.distributed import DistributedSampler
 from sklearn.model_selection import train_test_split
 import numpy as np
@@ -10,8 +16,6 @@ import pandas as pd
 from PIL import Image
 import json
 import os
-
-
 
 current_path = os.path.dirname(__file__)
 data_folder_config = os.path.join(current_path, "dataset_paths.json")
@@ -41,12 +45,28 @@ class TFDSMNISTDataset(Dataset):
         return len(self.images)
 
 class TreesDataset(Dataset):
-    def __init__(self, images_path, summan_path, label_mode, transform=None):
+    def __init__(
+            self,
+            images_path,
+            summan_path,
+            label_mode,
+            one_hot=True,
+            transform=None,
+            ignore_labels=False):
         self.dataframe = pd.read_csv(summan_path, sep=',')
+        self.one_hot = one_hot
         self.images_path = images_path
         self.transform = transform
+        self.custom_labels = None
+        self.num_classes = None
+        self.ignore_labels = ignore_labels
+        self.label_mode = label_mode
         # Labels are -1, 0, or 1
-        if label_mode == 'no_unknown':
+        if self.label_mode == 'unlabeled':
+            # Doesn't do anything as the labels
+            # will be ignored
+            pass
+        elif self.label_mode == 'no_unknown':
             # Now images with label 0 are removed,
             # and only labels -1 and 1 remain.
             self.dataframe = self.dataframe[
@@ -56,28 +76,32 @@ class TreesDataset(Dataset):
             self.dataframe['Intersection'] = (self.dataframe['Intersection']+1)
             # and finally to 0, 1
             self.dataframe['Intersection'] = (self.dataframe['Intersection']/2).astype(int)
-        elif label_mode == 'unknown':
+            self.num_classes = 2
+        elif self.label_mode == 'unknown':
             # Now only images with label 0 remain.
             self.dataframe = self.dataframe[
                 self.dataframe['Intersection'] == 0]
-        elif label_mode == 'unknown_positive':
+            self.num_classes = 2
+        elif self.label_mode == 'unknown_positive':
             # Now images with label 0 will be positive.
             idx = self.dataframe[self.dataframe['Intersection'] == 0].index
             self.dataframe.loc[idx, 'Intersection'] = 1
             idx = self.dataframe[self.dataframe['Intersection'] == -1].index
             self.dataframe.loc[idx, 'Intersection'] = 0  #Negatives still negatives
-        elif label_mode == 'unknown_negative':
+            self.num_classes = 2
+        elif self.label_mode == 'unknown_negative':
             # Now images with label 0 will be negative.
             idx = self.dataframe[self.dataframe['Intersection'] == 0].index
             self.dataframe.loc[idx, 'Intersection'] = -1
             idx = self.dataframe[self.dataframe['Intersection'] == -1].index
             self.dataframe.loc[idx, 'Intersection'] = 0  #Negatives still negatives
-        elif label_mode == 'outlier_4':
+            self.num_classes = 2
+        elif self.label_mode == 'outlier_4':
             # Now images have 4 labels
             # 1 positive, 1 challenging, and 2 negatives
             # one negative with trees and one without.
             posidx = self.dataframe[self.dataframe['Intersection'] == 1].index
-            unkownidx = self.dataframe[self.dataframe['Intersection'] == 0].index
+            unknowidx = self.dataframe[self.dataframe['Intersection'] == 0].index
             neg_treeidx = self.dataframe[
                 (self.dataframe['Intersection'] == -1)
                 &
@@ -89,14 +113,41 @@ class TreesDataset(Dataset):
                 (self.dataframe['Tree'] != 1)
                 ].index
             self.dataframe.loc[posidx, 'Intersection'] = 0
-            self.dataframe.loc[unkownidx, 'Intersection'] = 1
+            self.dataframe.loc[unknowidx, 'Intersection'] = 1
             self.dataframe.loc[neg_treeidx, 'Intersection'] = 2
             self.dataframe.loc[neg_no_treeidx, 'Intersection'] = 3
+            self.num_classes = 4
+        elif self.label_mode == 'outlier_3':
+            # Now images have 3 labels
+            # 1 positive, 1 challenging, and 1 negative
+            posidx = self.dataframe[self.dataframe['Intersection'] == 1].index
+            unknowidx = self.dataframe[self.dataframe['Intersection'] == 0].index
+            negidx = self.dataframe[self.dataframe['Intersection'] == -1].index
+            self.dataframe.loc[posidx, 'Intersection'] = 0
+            self.dataframe.loc[negidx, 'Intersection'] = 1
+            self.dataframe.loc[unknowidx, 'Intersection'] = 2
+            self.num_classes = 3
+
+    def set_custom_labels(self, custom_labels_numpy):
+        self.custom_labels = np.load(custom_labels_numpy)
             
 
     def __getitem__(self, idx):
         image_path = os.path.join(self.images_path, self.dataframe.iloc[idx]['img_name'])
-        label = self.dataframe.iloc[idx]['Intersection']
+        if self.ignore_labels:
+            label = 0
+        else:
+            if self.custom_labels is None:
+                label = self.dataframe.iloc[idx]['Intersection']
+                if self.one_hot:
+                    aux = np.zeros(self.num_classes)
+                    aux[label] = 1
+                    label = aux
+            else:
+                if self.one_hot:
+                    label = self.custom_labels[idx]
+                else:
+                    raise NotImplementedError("Categorical labels not implemented for custom labels.")
         image = Image.open(image_path)
         if self.transform is not None:
             image = self.transform(image)
@@ -105,6 +156,50 @@ class TreesDataset(Dataset):
     def __len__(self):
         return len(self.dataframe)
     
+class TreesDatasetRandomBinaryUnknown(TreesDataset):
+    """
+    This is a subclass of TreesDataset which
+    assigns a random binary label for unknown
+    labels.
+    """
+    def __init__(
+            self,
+            images_path,
+            summan_path,
+            label_mode,
+            one_hot=True,
+            transform=None,
+            ignore_labels=False):
+        super().__init__(images_path,
+            summan_path,
+            label_mode,
+            one_hot,
+            transform,
+            ignore_labels)
+        self.num_classes = 3
+
+    def __getitem__(self, idx):
+        if self.label_mode != "outlier_3":
+            raise NotImplementedError("Only label_mode outlier_3 implemented for Random Unknown Binary.")
+        image_path = os.path.join(self.images_path, self.dataframe.iloc[idx]['img_name'])
+        if self.ignore_labels:
+            label = 0
+        else:
+            if self.custom_labels is None:
+                label = self.dataframe.iloc[idx]['Intersection']
+                if label == 2: # Unknown
+                    label = random.choice([0,1])
+                if self.one_hot:
+                    aux = np.zeros(self.num_classes)
+                    aux[label] = 1
+                    label = aux
+            else:
+                raise NotImplementedError("Random Unknown Binary not implemented for pseudo-labels.")
+        image = Image.open(image_path)
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, label, image_path
+
 class ImageNetA(Dataset):
     def __init__(self, images_path, transform=None):
         # Array borrowed from ImageNet-A repository: https://github.com/hendrycks/natural-adv-examples
@@ -177,9 +272,11 @@ def get_dataset_info(dataset_name):
     if dataset_name == "STL10":
         num_classes = 103
         num_channels = 3
+        width = height = 96
     elif dataset_name == "CIFAR10":
         num_classes = 10
         num_channels = 3
+        width = height = 32
     elif dataset_name in [
         "CIFAR100",
         "CIFAR100Custom",
@@ -189,6 +286,11 @@ def get_dataset_info(dataset_name):
         ]:
         num_classes = 100
         num_channels = 3
+        width = height = 32
+    elif dataset_name in ["TreesUnlabed40k"]:
+        num_channels = 3
+        num_classes = 0
+        width = height = 640
     elif dataset_name in [
         "TreesHalfNoUnknown",
         "TreesNoUnknown",
@@ -204,12 +306,23 @@ def get_dataset_info(dataset_name):
         ]:
         num_classes = 2
         num_channels = 3
+        width = height = 640
     elif dataset_name in [
         "TreesLocating",
         "TreesLocatingTest3k"
         ]:
         num_classes = 4
         num_channels = 3
+        width = height = 640
+    elif dataset_name in [
+        "TreesLocatingTernary",
+        "TreesLocatingTest3kTernary",
+        "RandomTreesLocatingTernary",
+        "RandomTreesLocatingTest3kTernary"
+        ]:
+        num_classes = 3
+        num_channels = 3
+        width = height = 640
     elif dataset_name in [
         "MNIST",
         "MNISTCustom",
@@ -218,9 +331,11 @@ def get_dataset_info(dataset_name):
         ]:
         num_classes = 10
         num_channels = 3
+        width = height = 28
     elif dataset_name == "iNaturalist2021Mini":
         num_classes = 10000
         num_channels = 3
+        width = height = 0 # vary
     elif dataset_name in [
         "ImageNet2012",
         "ImageNet2012Half",
@@ -228,20 +343,116 @@ def get_dataset_info(dataset_name):
         "ImageNetA"]:
         num_classes = 1000
         num_channels = 3
+        width = height = 0 # vary
     else:
         raise Exception(f"Unknown dataset at get_dataset_info: {dataset_name}")
-    return num_classes, num_channels
+    return num_classes, num_channels, height, width
+
+class LambdaWithArgs(torchvision.transforms.Lambda):
+    def __init__(self, lambd, *args, **kwargs):
+        super().__init__(lambd)
+        self.args = args if len(args) > 0 else None
+        self.kwargs = kwargs if len(kwargs) > 0 else None
+
+
+    def __call__(self, img):
+        if self.args is not None:
+            if self.kwargs is not None:
+                return self.lambd(img, *self.args, **self.kwargs)
+            else:
+                return self.lambd(img, *self.args)
+        else:
+            if self.kwargs is not None:
+                return self.lambd(img, **self.kwargs)
+            else:
+                return self.lambd(img)
+
+# def SharpnessTransform(image, sharpness_level):
+#     output = F.adjust_sharpness(image, sharpness_level)
+#     return output
+
+def get_sharpness_transform(sharpness_level):
+    f = LambdaWithArgs(adjust_sharpness, sharpness_level)
+    return [f]
+
+# def CropTransform(image, top, left, height, width):
+#     if len(image.shape) == 3:
+#         height = image.shape[1]
+#         width = image.shape[2]
+#     elif len(image.shape) == 2:
+#         height = image.shape[0]
+#         width = image.shape[1]
+#     cropped = crop(image,0, 0, int(height/2), width)
+#     return cropped
+
+def get_topcrop_transform(height, width):
+    f = LambdaWithArgs(crop, 0, 0, int(height/2), width)
+    return [f]
+
+def get_topcrop_resize_transform(height, width):
+    ret = []
+    ret += get_topcrop_transform(height, width)
+    # Requires image NOT being a tensor, so this transform
+    # has to come before ToTensor!
+    ret.append(transforms.Resize((224, 224), interpolation=InterpolationMode.LANCZOS))
+    return ret
+
+def get_topcrop_resize_horizontal_transform(height, width):
+    ret = []
+    ret += get_topcrop_transform(height, width)
+    # Requires image NOT being a tensor, so this transform
+    # has to come before ToTensor!
+    halftop = int(height/2)
+    ret.append(transforms.Resize((halftop, halftop), interpolation=InterpolationMode.LANCZOS))
+    return ret
+
+def get_resize_crop_transform():
+    t_list = []
+    t_list.append(transforms.Resize(256))
+    t_list.append(transforms.CenterCrop(224))
+    return t_list
+
+def get_dataset_stats(dataset_loader):
+    """
+    Returns the mean and std per-channel of
+    images in the dataset_loader. This assumes images are RGB
+    """
+    mean_per_channel = torch.tensor([0.,0.,0.])
+    mean_sq = torch.tensor([0.,0.,0.])
+    std_per_channel = torch.tensor([0.,0.,0.])
+    n = len(dataset_loader.dataset)
+    num_pixels = None
+    from tqdm import tqdm
+    for batch_idx, (data, *target) in enumerate(tqdm(dataset_loader)):
+        if num_pixels is None:
+            num_pixels = data.shape[2]*data.shape[3]
+            n *= num_pixels
+        # total sum
+        mean_per_channel += torch.sum(data, axis=[0,2,3])/n
+        mean_sq += torch.sum(data**2, axis=[0,2,3])/n
+        #n += len(data)
+    # Computational formula for variance:
+    # Ref: https://www.ncl.ac.uk/webtemplate/ask-assets/external/maths-resources/statistics/descriptive-statistics/variance-and-standard-deviation.html
+    variance = mean_sq-(mean_per_channel**2)
+    std_per_channel = variance**(0.5)
+    return mean_per_channel, std_per_channel
+
 
 
 def prepare_dataset(
     dataset_name,
+    args,
+    numpy_labels_path=None,
+    extra_train_loader=None,
     use_imagenet_stat=True,
     train_kwargs=None,
     test_kwargs=None,
     custom_disagreement_csv=None,
     custom_disagreement_threshold=0,
     shuffle_trainval=True,
-    ddp_kwargs=None):
+    fullres=False,
+    ddp_kwargs=None,
+    ignore_labels=False,):
     """
     (optional) custom_disagreement_csv is a csv with
     the disagreements of networks about the class
@@ -252,13 +463,39 @@ def prepare_dataset(
     global data_folder
     transform = None
     #if base_network in ["resnet", "mobilenetv3_large", "vgg"]:
-    t_list = [
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        ]
-    if use_imagenet_stat:
-        t_list.append(transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
+    t_list = []
+    if args.adjust_sharpness != 1:
+        t_list += get_sharpness_transform(args.adjust_sharpness)
+    if args.tophalf:
+        # num_classes, num_channels, height, width
+        _, _, height, width = \
+        get_dataset_info(dataset_name=args.dataset_name)
+        t_list += get_topcrop_transform(height, width)
+    elif args.tophalfresize:
+        # num_classes, num_channels, height, width
+        _, _, height, width = \
+        get_dataset_info(dataset_name=args.dataset_name)
+        t_list += get_topcrop_resize_transform(height, width)
+    elif args.tophalfresizehorizontal:
+        # num_classes, num_channels, height, width
+        _, _, height, width = \
+        get_dataset_info(dataset_name=args.dataset_name)
+        t_list += get_topcrop_resize_horizontal_transform(height, width)
+    else:
+        if not fullres:
+            t_list += get_resize_crop_transform()
+    
+    t_list.append(transforms.ToTensor())
+    if args.customnorm:
+        t_list.append(
+            transforms.Normalize(
+                [0.4864, 0.4991, 0.4856],
+                [0.2319, 0.2319, 0.2607]
+                ))
+    elif use_imagenet_stat:
+        t_list.append(transforms.Normalize(
+            [0.485, 0.456, 0.406],
+            [0.229, 0.224, 0.225]))
     transform=transforms.Compose(t_list)
     train_loader = None
     test_loader = None
@@ -427,7 +664,7 @@ def prepare_dataset(
             "MNISTHalf", "MNISTHalfValid",
             "MNISTCustom"]:
             if ddp_kwargs is not None:
-            	raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
+                raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
             # Ref: https://gist.github.com/kevinzakka/d33bf8d6c7f06a9d8c76d97a7879f5cb
             targets = train_dataset.targets
             train_idx, valid_idx= train_test_split(
@@ -485,6 +722,18 @@ def prepare_dataset(
             data_folder['imagenet'],
             split="val",
             transform=transform)
+        if args.maxsamples is not None:
+            train_sampler = SubsetRandomSampler(np.arange(args.maxsamples))
+            valid_sampler = SubsetRandomSampler(np.arange(args.maxsamples))
+            train_kwargs['shuffle'] = False
+            train_loader = torch.utils.data.DataLoader(
+                dataset=train_dataset,
+                sampler=valid_sampler, **train_kwargs)
+            test_kwargs['shuffle'] = False
+            test_loader = torch.utils.data.DataLoader(
+                dataset=test_dataset,
+                sampler=valid_sampler, **test_kwargs)
+
         # if ddp_kwargs is not None:
         #     train_dataset = DistributedSampler(train_dataset, **ddp_kwargs)
         #     test_dataset = DistributedSampler(test_dataset, **ddp_kwargs)
@@ -493,7 +742,7 @@ def prepare_dataset(
         if dataset_name in ["ImageNet2012Half",
             "ImageNet2012HalfValid"]:
             if ddp_kwargs is not None:
-	            raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
+                raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
             # Ref: https://gist.github.com/kevinzakka/d33bf8d6c7f06a9d8c76d97a7879f5cb
             targets = train_dataset.targets
             train_idx, valid_idx= train_test_split(
@@ -520,7 +769,7 @@ def prepare_dataset(
                     sampler=valid_sampler, **train_kwargs)
     elif dataset_name in ["ImageNetO"]:
         if ddp_kwargs is not None:
-        	raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
+            raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
         image_o_test_kwargs = {
             "images_path": data_folder['imagenet-O'],
             "transform": transform
@@ -529,7 +778,7 @@ def prepare_dataset(
         test_dataset = ImageNetO(**image_o_test_kwargs)
     elif dataset_name in ["ImageNetA"]:
         if ddp_kwargs is not None:
-	        raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
+            raise Exception(f"DistributedDataParallel (use_ddp) not allowed for this dataset mode: {dataset_name}")
         train_kwargs['shuffle'] = False
         test_kwargs['shuffle'] = False
         image_a_test_kwargs = {
@@ -544,15 +793,29 @@ def prepare_dataset(
         "TreesCustomNoUnknown","TreesCustomUnknownPositive", "TreesCustomUnknownNegative",
         "TreesUnknownTestRev", "TreesNoUnknownRev",
         "TreesDetecting", "TreesTrainDetecting", "TreesTestDetecting",
-        "TreesLocating", "TreesLocatingTest3k"
+        "TreesLocating", "TreesLocatingTest3k",
+        "TreesUnlabed40k"
         ]:
         tree_train_kwargs = {
             "images_path": data_folder['trees'],
             "label_mode": "no_unknown",
-            "transform": transform
+            "transform": transform,
+            "ignore_labels": ignore_labels
         }
         tree_test_kwargs = tree_train_kwargs.copy()
         tree_test_kwargs["summan_path"] = data_folder['summanValRev']
+        if dataset_name in ["TreesUnlabed40k", "TreesUnlabed8k"]:
+            tree_train_kwargs["label_mode"] = "unlabeled"
+            if dataset_name in ["TreesUnlabed40k"]:
+                # In the Detecting's summan there are only
+                # binary (0/1) labels, and 0 is negative, not unknown.
+                tree_train_kwargs["images_path"] = data_folder['treesUnlabeled40k']
+                tree_train_kwargs["summan_path"] = data_folder['summanUnlabeled40k']
+            elif dataset_name in ["TreesUnlabed8k"]:
+                # In the Detecting's summan there are only
+                # binary (0/1) labels, and 0 is negative, not unknown.
+                tree_train_kwargs["images_path"] = data_folder['treesUnlabeled8k']
+                tree_train_kwargs["summan_path"] = data_folder['summanUnlabeled8k']
         if dataset_name in ["TreesDetecting"]:
             # In the Detecting's summan there are only
             # binary (0/1) labels, and 0 is negative, not unknown.
@@ -607,9 +870,43 @@ def prepare_dataset(
                 tree_test_kwargs["label_mode"] = "unknown"
         train_dataset = TreesDataset(**tree_train_kwargs)
         test_dataset = TreesDataset(**tree_test_kwargs)
-        if ddp_kwargs is not None:
-            train_dataset = DistributedSampler(train_dataset, **ddp_kwargs)
-            test_dataset = DistributedSampler(test_dataset, **ddp_kwargs)
+        if numpy_labels_path is not None:
+            train_dataset.set_custom_labels(numpy_labels_path)
+        if extra_train_loader is not None:
+            extra_datasets = []
+            for extra_loader in extra_train_loader:
+                extra_datasets.append(extra_loader.dataset)
+            train_dataset = ConcatDataset([train_dataset] + extra_datasets)
+    elif dataset_name in [
+              "TreesLocatingTernary",
+        "RandomTreesLocatingTernary",
+              "TreesLocatingTest3kTernary",
+        "RandomTreesLocatingTest3kTernary",
+        ]:
+        tree_train_kwargs = {
+            "images_path": data_folder['trees'],
+            "label_mode": "no_unknown",
+            "transform": transform,
+            "ignore_labels": ignore_labels
+        }
+        tree_test_kwargs = tree_train_kwargs.copy()
+        
+        tree_train_kwargs["label_mode"] = "outlier_3"
+        tree_test_kwargs["label_mode"] = "outlier_3"
+
+        tree_train_kwargs["summan_path"] = data_folder['summanTrain']
+        tree_test_kwargs["summan_path"] = data_folder['summanTest']
+        if dataset_name in ["TreesLocatingTest3kTernary", "RandomTreesLocatingTest3kTernary"]:
+            tree_test_kwargs["summan_path"] = data_folder['summanTest3k']
+        if dataset_name in ["RandomTreesLocatingTernary", "RandomTreesLocatingTest3kTernary"]:
+            train_dataset = TreesDatasetRandomBinaryUnknown(**tree_train_kwargs)
+        elif dataset_name in ["TreesLocatingTernary", "TreesLocatingTest3kTernary"]:
+            train_dataset = TreesDataset(**tree_train_kwargs)
+        test_dataset = TreesDataset(**tree_test_kwargs)
+        if numpy_labels_path is not None:
+            raise NotImplementedError("Numpy labels not implemented for Random Unknown Binary.")
+        if extra_train_loader is not None:
+            raise NotImplementedError("Custom labels not implemented for Random Unknown Binary.")
     elif dataset_name == "iNaturalist2021Mini":
         train_dataset = datasets.INaturalist(
             data_folder['torch_datasets'],

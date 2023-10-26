@@ -5,12 +5,10 @@ Here we define a MobileNetV3Large with early exits after each block.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint_sequential
 from networks.elyx_head import ElyxHead, ElyxHead2, ElyxHead3, ElyxHeadMobNetV3Large
-from networks.elyx_backbone import ModuleWrapperIgnores2ndArg
 from torchvision import models
 
-class MobileNetV3Large(nn.Module):
+class MobileNetV3LargeTrees(nn.Module):
     def __init__(
         self,
         base_model,
@@ -22,7 +20,7 @@ class MobileNetV3Large(nn.Module):
         keep_head=False,
         device='cuda',
         use_timm=False) -> None:
-        super(MobileNetV3Large, self).__init__()
+        super(MobileNetV3LargeTrees, self).__init__()
         self.begin = None
         if use_timm:
             self.original_model = timm.create_model(base_model,pretrained=pretrained)
@@ -39,12 +37,19 @@ class MobileNetV3Large(nn.Module):
         else:
             dropout = 0.2
             inftrs = 960
-            output_channel=1280
+            #output_channel=1280
             self.classifier = nn.Sequential(
-                nn.Linear(inftrs, output_channel),
-                nn.Hardswish(),
-                nn.Dropout(dropout),
-                nn.Linear(output_channel, num_classes),
+                nn.Linear(inftrs, 1080),
+                nn.Sigmoid(),
+                nn.Linear(1080, 540),
+                nn.Sigmoid(),
+                nn.Linear(540, 270),
+                nn.Sigmoid(),
+                nn.Linear(270, 120),
+                nn.Sigmoid(),
+                nn.Linear(120, 60),
+                nn.Sigmoid(),
+                nn.Linear(60, num_classes),
             )
 
         self.num_classes = num_classes
@@ -76,7 +81,7 @@ class MobileNetV3Large(nn.Module):
         if self.begin is not None:
             self.begin.requires_grad_(False)
         self.layers.requires_grad_(False)
-    
+
     def reset_last_exit(self):
         self.last_exit = 0
         self.exited = False
@@ -114,13 +119,8 @@ class MobileNetV3Large(nn.Module):
             else:
                 intermediate_outputs.append(y)
 
-        # Ref:
-        # https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
-        #x = checkpoint(self.layers[len(self.exits):], x)
-        #x = checkpoint(
-        #    self.module_wrapper, x, self.dummy_arg)
-        x = checkpoint_sequential(
-            self.layers[len(self.exits):], 3, x)
+        for layer in self.layers[len(self.exits):]:
+            x = layer(x)
         x = self.adapool2d(x)
         x = x.view(x.shape[0], -1)
         x = self.fc(x)
@@ -128,7 +128,7 @@ class MobileNetV3Large(nn.Module):
         output = F.log_softmax(x, dim=1)
         return output, intermediate_outputs
 
-class MobileNetV3LargeElyx(MobileNetV3Large):
+class MobileNetV3LargeElyxTrees(MobileNetV3LargeTrees):
     # Ref: https://forums.fast.ai/t/pytorch-best-way-to-get-at-intermediate-layers-in-vgg-and-resnet/5707/3
     def __init__(
         self,
@@ -164,7 +164,7 @@ class MobileNetV3LargeElyx(MobileNetV3Large):
         else:
             original_model = models.mobilenet_v3_large
 
-        super(MobileNetV3LargeElyx, self).__init__(
+        super(MobileNetV3LargeElyxTrees, self).__init__(
             base_model=original_model,
             num_channels=num_channels,
             num_classes=num_classes,
@@ -186,8 +186,4 @@ class MobileNetV3LargeElyx(MobileNetV3Large):
 
         self.fc = self.classifier
 
-        # Ref:
-        # https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
-        self.dummy_tensor = torch.ones(1, dtype=torch.float32, requires_grad=True)
-        self.module_wrapper =\
-            ModuleWrapperIgnores2ndArg(self.layers[len(self.exits):])
+        

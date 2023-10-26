@@ -22,6 +22,9 @@ class PrintLogger():
     def log_train_batch_time(self, time):
         self.log(f"train/batch/time {time}")
 
+    def log_lr(self, current_lr):
+        self.log(f"train/learning_rate {current_lr}")
+
     def log_train_time(self, time):
         self.log(f"train/time {time}")
 
@@ -106,11 +109,15 @@ class NeptuneLogger():
     def setup_neptune(self, nparams = None):
         self.run["parameters"] = nparams
 
+
     def log_train_last_exit(self, last_exit):
         self.run["train/batch/last_exit"].log(last_exit)
 
     def log_train_batch_time(self, time):
         self.run["train/batch/time"].log(time)
+
+    def log_lr(self, current_lr):
+        self.run["train/learning_rate"].log(current_lr)
 
     def log_train_time(self, time):
         self.run["train/time"].log(time)

@@ -49,7 +49,7 @@ from train.training import train, test
 
 from utils.iteration_criterion import shannon_entropy, EntropyCriterion
 from utils.neptune_logger import NeptuneLogger, PrintLogger
-from utils.dataset import get_dataset_info, prepare_dataset
+from utils.dataset import get_dataset_info, prepare_dataset, get_dataset_stats
 from tqdm import tqdm
 from functools import partialmethod
 
@@ -92,6 +92,7 @@ class IterationScheduler:
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
+    #os.environ['MASTER_PORT'] = '12355'
     os.environ['MASTER_PORT'] = '12355'
 
     # initialize the process group
@@ -106,11 +107,14 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
     world_size = None
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     torch.manual_seed(args.seed)
+    device = "cuda" if use_cuda else "cpu"
 
     if args.use_fsdp:
+        device = None
+    elif args.use_ddp:
         world_size = args.world_size
         setup(rank, world_size)
-        device = None
+        torch.cuda.set_device(rank)
         if nlogger == None and rank == 0:
             nlogger = NeptuneLogger(
             name=nlogger_kwargs['name'],
@@ -118,8 +122,8 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
             project=nlogger_kwargs['project'],
             api_token=nlogger_kwargs['api_token'])
             nlogger.setup_neptune(nlogger_kwargs['nparams'])
-    else:
-        device = "cuda" if use_cuda else "cpu"
+    #else:
+    #    device = "cuda" if use_cuda else "cpu"
     
     if args.use_ddp:
         ddp_kwargs = {
@@ -136,14 +140,12 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
     train_kwargs = {'batch_size': args.batch_size, 'shuffle': True}
     test_kwargs = {'batch_size': args.test_batch_size, 'shuffle': True}
     if use_cuda:
-        # cuda_kwargs = {'num_workers': 1,
-        #                'pin_memory': True,
-        #                'shuffle': True}
         cuda_kwargs = {'pin_memory': True}
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    num_classes, num_channels = \
+    # height, width
+    num_classes, num_channels, _, _ = \
         get_dataset_info(dataset_name=args.dataset_name)
 
     model, base_network_name = get_network(
@@ -157,21 +159,50 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
         use_timm=args.use_timm)
 
     
+    if args.only_create_pseudo_labels:
+        print(f"Avoid loading the dataset {args.dataset_name} because of --only-create-pseudo-labels.")
+    else:
+        pseudo_loaders = None
+        if (not args.only_test) and\
+            (args.pseudo_datasets is not None) and\
+            (args.pseudo_datasets != "None"):
+            aux = args.pseudo_datasets.split(",")
+            pseudo_loaders = []
+            for i in range(0, len(aux), 2):
+                pseudo_loader, _ =\
+                    prepare_dataset(
+                    dataset_name = aux[i],
+                    numpy_labels_path=aux[i+1],
+                    use_imagenet_stat = not args.from_scratch,
+                    train_kwargs=train_kwargs,
+                    test_kwargs=test_kwargs,
+                    custom_disagreement_csv=args.custom_disagreement_csv,
+                    custom_disagreement_threshold=args.custom_disagreement_threshold,
+                    fullres=args.fullres,
+                    ddp_kwargs=ddp_kwargs,
+                    args=args,
+                )
+                pseudo_loaders.append(pseudo_loader)
+        train_loader, test_loader =\
+            prepare_dataset(
+            dataset_name = args.dataset_name,
+            extra_train_loader=pseudo_loaders,
+            use_imagenet_stat = not args.from_scratch,
+            train_kwargs=train_kwargs,
+            test_kwargs=test_kwargs,
+            custom_disagreement_csv=args.custom_disagreement_csv,
+            custom_disagreement_threshold=args.custom_disagreement_threshold,
+            fullres=args.fullres,
+            ddp_kwargs=ddp_kwargs,
+            args=args,
+        )
+        
 
-    train_loader, test_loader =\
-        prepare_dataset(
-        dataset_name = args.dataset_name,
-        use_imagenet_stat = not args.from_scratch,
-        train_kwargs=train_kwargs,
-        test_kwargs=test_kwargs,
-        custom_disagreement_csv=args.custom_disagreement_csv,
-        custom_disagreement_threshold=args.custom_disagreement_threshold,
-        ddp_kwargs=ddp_kwargs,
-    )
+
+            
     if args.save_model is not None:
         save_path = os.path.join(args.output_folder,
             f"{args.save_model}.pt")
-
 
     if args.load_model is not None:
         # Workaround because the name of the classification head
@@ -197,14 +228,17 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
             )
         print(f"FSDP parameters device: {next(model.parameters()).device}")
     elif args.use_ddp:
-        model = DDP(model, device_ids=[device])
+        #torch.cuda.set_device(rank)
+        model = DDP(model, device_ids=[device], find_unused_parameters=True)
+        #model = DDP(model, find_unused_parameters=True)
         
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
-    scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+    scheduler = StepLR(optimizer, step_size=args.lr_step, gamma=args.gamma)
     correct_test_max = -1
+    current_patience = 0
     for epoch in range(1, args.epochs + 1):
-        if only_create_pseudo_labels:
+        if args.only_create_pseudo_labels:
             break
         if not args.only_test:
             if args.log_it_folder is not None:
@@ -215,6 +249,11 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
                     for each training epoch a set of images would be
                     produced for each intermediate exit.
                     """)
+            if not args.use_ddp:
+                nlogger.log_lr(scheduler.get_last_lr())
+            else:
+              if (rank == 0):
+                nlogger.log_lr(scheduler.get_last_lr())
             train(
                 args,
                 model,
@@ -224,26 +263,26 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
                 epoch,
                 cweights=cweights,
                 nlogger=nlogger,
+                use_ddp=args.use_ddp,
                 use_fsdp=args.use_fsdp)
-        
+
         correct_test, test_loss = test(
             model,
             device,
             test_loader,
             args.dataset_name,
-            conf_matrix_output=
-                os.path.join(args.output_folder,
-                    "conf_mat_test.png"),
+            args,
             nlogger=nlogger,
             log_it_folder=args.log_it_folder,
             copy_images_to_it_folder=(not args.avoid_copy_images_it_folder),
+            use_ddp=args.use_ddp,
             use_fsdp=args.use_fsdp,
             return_loss=True,
             loss_func=args.loss)
-        if correct_test > correct_test_max \
-            and (not args.only_test or args.force_save): 
+        if correct_test > correct_test_max: 
             correct_test_max = correct_test
-            if args.save_model is not None:
+            current_patience = 0            
+            if (not args.only_test or args.force_save) and (args.save_model is not None):
                 if args.use_ddp:
                     if rank == 0:
                         torch.save({
@@ -263,38 +302,51 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
                         checkpoint['optimizer_state_dict'])
                 else:
                     torch.save(model, save_path)
+        else:
+           current_patience += 1 
+        if current_patience >= args.patience:
+            break
         if args.only_test:
             break
         scheduler.step()
-    if args.create_pseudo_labels:
+    if args.create_pseudo_label_datasets is not None:
+        print("Initializing model for creating pseudo-labels.")
+        train_kwargs['batch_size'] = int(np.min([32, train_kwargs['batch_size']]))
+        test_kwargs['batch_size'] = int(np.min([32, test_kwargs['batch_size']]))
         if args.save_model is not None:
             # Best test model
+            print("Using best test model.")
             model = torch.load(save_path)
         elif args.load_model is not None:
             # Loaded model
             model = torch.load(args.load_model)
+            print("Using loaded test model.")
         else:
             # Last epoch trained model
+            print("Using last epoch model.")
             pass
-        train_kwargs["shuffle"] = False
-        test_kwargs["shuffle"] = False
-        train_loader, test_loader =\
-            prepare_dataset(
-            dataset_name = args.dataset_name,
-            use_imagenet_stat = not args.from_scratch,
-            train_kwargs=train_kwargs,
-            test_kwargs=test_kwargs,
-            custom_disagreement_csv=args.custom_disagreement_csv,
-            custom_disagreement_threshold=args.custom_disagreement_threshold,
-            ddp_kwargs=None,
-        )
-        unbatched_train_raw_outputs = None
-        unbatched_train_onehot_outputs = None
-        unbatched_test_raw_outputs = None
-        unbatched_test_onehot_outputs = None
-        for i_loader, loader in enumerate([train_loader, test_loader]):
+        model = model.to(device)
+        create_pseudo_label_datasets =\
+            args.create_pseudo_label_datasets.split(",")
+        for d in create_pseudo_label_datasets:
+            print(f"Loading dataset {d} for creating pseudo-labels.")
+            train_kwargs["shuffle"] = False
+            test_kwargs["shuffle"] = False
+            loader, _ =\
+                prepare_dataset(
+                dataset_name = d,
+                use_imagenet_stat = not args.from_scratch,
+                train_kwargs=train_kwargs,
+                test_kwargs=test_kwargs,
+                custom_disagreement_csv=args.custom_disagreement_csv,
+                custom_disagreement_threshold=args.custom_disagreement_threshold,
+                fullres=args.fullres,
+                ddp_kwargs=None,
+                ignore_labels=True,
+                args=args,
+            )
             unbatched_output = None
-            for batch_idx, (data, *target) in enumerate(train_loader):
+            for batch_idx, (data, *target) in enumerate(loader):
                 if len(target) == 1:
                     target = target[0]
                     image_names = None
@@ -302,35 +354,49 @@ def main_loop(rank, args, nlogger, nlogger_kwargs=None):
                     # This is important when testing the Trees dataset
                     image_names = target[1]
                     target = target[0]
-                output, intermediate_outputs = model(data, gt=target)
+                data, target = data.to(device), target.to(device)
+                output, intermediate_outputs = model(data, gt=None)
                 if unbatched_output is None:
                     unbatched_output = output.detach().cpu().numpy()
                 else:
                     aux = output.detach().cpu().numpy()
-                    unbatched_output = np.stack([unbatched_output, aux])
+                    unbatched_output = np.concatenate([unbatched_output, aux])
+                if batch_idx % args.log_interval == 0:
+                    print(
+                        (f"Creating pseudo-labels: ",
+                        f"[{batch_idx * len(data)}/{len(loader.dataset)}"
+                        ))
 
             # intermediate_outputs are being thrown away for now
-            if i_loader == 0: # train data
-                np.save(
-                    os.path.join(
-                    args.output_folder, "raw_train_outputs.npy"),
-                    unbatched_output)
-                np.save(
-                    os.path.join(
-                    args.output_folder, "categoric_train_outputs.npy"),
-                    unbatched_output.argmax(axis=-1))
-            elif i_loader == 1: # test data
-                np.save(
-                    os.path.join(
-                    args.output_folder, "raw_test_outputs.npy"),
-                    unbatched_output)
-                np.save(
-                    os.path.join(
-                    args.output_folder, "categoric_test_outputs.npy"),
-                    unbatched_output.argmax(axis=-1))
+            # if i_loader == 0: # train data
+            np.save(
+                os.path.join(
+                args.output_folder, f"raw_train_{d}_outputs.npy"),
+                unbatched_output)
+            np.save(
+                os.path.join(
+                args.output_folder, f"probs_train_{d}_outputs.npy"),
+                np.exp(unbatched_output))
+            np.save(
+                os.path.join(
+                args.output_folder, f"categoric_train_{d}_outputs.npy"),
+                unbatched_output.argmax(axis=-1))
+            print(f"Pseudo-labels for {d} training data created!")
+                    
+            # elif i_loader == 1: # test data
+            #     np.save(
+            #         os.path.join(
+            #         args.output_folder, "raw_test_outputs.npy"),
+            #         unbatched_output)
+            #     np.save(
+            #         os.path.join(
+            #         args.output_folder, "categoric_test_outputs.npy"),
+            #         unbatched_output.argmax(axis=-1))
+            #     print("Pseudo-labels for testing data created!")
         
 
-    if (not args.use_fsdp) and args.use_ddp:
+    #if (not args.use_fsdp) and args.use_ddp:
+    if args.use_ddp:
         cleanup()
 
 def main():
@@ -353,6 +419,12 @@ def main():
         help='Which Elyx Head should be used?')
     parser.add_argument('--dataset-name', type=str,
         help='Which dataset should be loaded?')
+    parser.add_argument('--customnorm', action='store_true', default=False,
+                        help='Custom normalization stats (using trees stats). (Default: False).')
+    parser.add_argument('--maxsamples', type=int,
+        help='Max. number of samples in train/test datasets to be loaded. This is used for debugging.')
+    parser.add_argument('--pseudo-datasets', type=str,
+        help='Comma-separated list of pairs (with comma-separated items) of dataset name and numpy file of pseudo-labels. E.g., D1,/path1/f1.npy,D2,/path2/f2.npy,...')
     parser.add_argument('--custom-disagreement-csv', type=str,
         help="(Optional) The disagreements csv to use when loading a "
         "customized version of a dataset (e.g. MNISTCustom).")
@@ -361,12 +433,26 @@ def main():
         "Default: 0 - All models should agree.")
     parser.add_argument('--batch-size', type=int, default=250, metavar='N',
                         help='input batch size for training (default: 256)')
+    parser.add_argument('--adjust-sharpness', type=float, default=1.0,
+                        help='(Optional) Float indicating the sharpness of the image, 0: for blurry, 1: for original, >1 for sharper. (Default: 1.0)')
+    parser.add_argument('--fullres', action='store_true', default=False,
+                        help='Avoid the resize and cropping transforms to the data. (Default: False).')
+    parser.add_argument('--tophalf', action='store_true', default=False,
+                        help='Crops out the bottom half of the image. (Default: False).')
+    parser.add_argument('--tophalfresize', action='store_true', default=False,
+                        help='Crops out the bottom half of the image and then resizes it to 224x224. (Default: False).')
+    parser.add_argument('--tophalfresizehorizontal', action='store_true', default=False,
+                        help='Crops out the bottom half of the image (height = H/2) and then resizes it to H/2xH/2 (Horizontal matches the vertical size). (Default: False).')
     parser.add_argument('--test-batch-size', type=int, default=250, metavar='N',
                         help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=20, metavar='N',
+    parser.add_argument('--epochs', type=int, default=1, metavar='N',
                         help='number of epochs to train (default: 1)')
+    parser.add_argument('--patience', type=int, default=10, metavar='N',
+                        help='number of epochs to wait for a better test accuracy before early stopping. (default: 10)')
     parser.add_argument('--lr', type=float, default=1.0, metavar='LR',
                         help='learning rate (default: 1.0)')
+    parser.add_argument('--lr-step', type=float, default=1, metavar='LRSTEP',
+                        help='Periodicity of the learning rate decay (default: 1)')
     parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
                         help='Learning rate step gamma (default: 0.7)')
     parser.add_argument('--loss', type=str, default="nll",
@@ -393,13 +479,8 @@ def main():
                         help='If a name is provided then it loads a model saved with this name.')
     parser.add_argument('--only-test', action='store_true', default=False,
                         help='For running a previously saved model without fine-tuning it.')
-    parser.add_argument('--only-create-pseudo-labels', action='store_true', default=False,
-                        help=(
-                            'For running a previously saved model without fine-tuning '
-                            'and testing it. Implies --create-pseudo-labels and ignores --only-test.'))
-    parser.add_argument('--create-pseudo-labels', action='store_true', default=False,
-                        help=
-                        (
+    parser.add_argument('--create-pseudo-label-datasets', type=str,
+                        help=('A comma-separted list with the name of the datasets whose images should be pseudo-labeled. '
                         'Creates pseudo-labels and stores at the output folder.'
                         'If --save-model is provided, then the model with the best '
                         'val/test accuracy will be loaded by the end of training '
@@ -407,8 +488,11 @@ def main():
                         'provided, but --load-model is, then the loaded model '
                         'will be used instead. If neither --save-model nor '
                         '--load-model are provided then the model at the last '
-                        'training epoch will be used.'
-                        ))
+                        'training epoch will be used.'))
+    parser.add_argument('--only-create-pseudo-labels', action='store_true', default=False,
+                        help=(
+                            'For running a previously saved model without fine-tuning '
+                            'and testing it. Requires --create-pseudo-label-datasets and ignores --only-test.'))
     parser.add_argument('--force-save', action='store_true', default=False,
                         help='Used in conjunction with --only-test to allow for saving the tested model (may cause overwriting!).')
     parser.add_argument('--silence', action='store_true', default=False,
@@ -419,6 +503,8 @@ def main():
                         help='Avoid copying the dataset to the it folder separating images per early exit. Only used if --log-it-folder is used.')
     parser.add_argument('--log-file', type=str,
                         help='Log file name.')
+    parser.add_argument('--avoidsaveconfmat', action='store_true', default=False,
+                        help='Avoids generating a confusion matrix at best test accuracy epoches, which can take a long time when there are too many classes. (Default: True)')
     parser.add_argument('--output-folder', type=str,
                         help='Where produced files should be stored.')
     parser.add_argument('--project-tags', type=str,
@@ -430,11 +516,18 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.output_folder, exist_ok=True)
     project_tags = []
+
+    if (args.fullres and args.tophalf) or \
+       (args.fullres and args.tophalfresize) or \
+       (args.tophalf and args.tophalfresize):
+        raise Exception("--fullres, --tophalf and --tophalfresize are mutually exclusive options; only one (or none) of them can be used at a time.")
+
     if args.project_tags is not None:
         project_tags += args.project_tags.split(",")
     
     if args.only_create_pseudo_labels:
-        args.create_pseudo_labels = True
+        if args.create_pseudo_label_datasets is None:
+            raise Exception("--only-create-pseudo-labels requires --create-pseudo-label-datasets.")
 
     if args.use_fsdp:
         args.use_ddp = True
@@ -446,9 +539,13 @@ def main():
     nparams = {
     'loss': args.loss,
     'lr': args.lr,
+    'cweights': args.cweights,
+    'fullres': args.fullres,
     'train_bs': args.batch_size,
     'test_bs': args.test_batch_size,
     'dataset': args.dataset_name,
+    'maxsamples': args.maxsamples,
+    'pseudo_dataset': args.pseudo_datasets,
     'gamma': args.gamma,
     "optimizer": "Adadelta",
     "basemodel_pretrained": str(not args.from_scratch),
@@ -457,7 +554,7 @@ def main():
     "model": f"{model_name}",
     "save_model": f"{args.save_model}",
     "load_model": f"{args.load_model}",
-    "create_pseudo_labels": f"{args.create_pseudo_labels}",
+    "create_pseudo_label_datasets": f"{args.create_pseudo_label_datasets}",
     }
 
     root_logger= logging.getLogger()
@@ -466,18 +563,19 @@ def main():
         os.path.join(args.output_folder, args.log_file), 'w', 'utf-8')
     root_logger.addHandler(handler)
 
-    if args.create_pseudo_labels:
+    if args.create_pseudo_label_datasets is not None:
         if args.use_ddp:
-            raise print("Warning: When generating pseudo-labels ddp will be disabled.")
-        if args.dataset_name in [
-            "ImageNet2012Half",
-            "ImageNet2012HalfValid"]:
-            raise NotImplementedError(
-                f"The selected dataset {args.dataset_name} "
-                f"uses a random subset sampler, thus the "
-                f"order of produced pseudo labels is not "
-                f"guaranteed to be kept."
-                )
+            print("Warning: When generating pseudo-labels ddp will be disabled.")
+        for d in args.create_pseudo_label_datasets.split(","):
+            if d in [
+                "ImageNet2012Half",
+                "ImageNet2012HalfValid"]:
+                raise NotImplementedError(
+                    f"The selected dataset {args.dataset_name} "
+                    f"uses a random subset sampler, thus the "
+                    f"order of produced pseudo labels is not "
+                    f"guaranteed to be kept."
+                    )
     if args.use_ddp:
         #nlogger = PrintLogger(name=args.exp_name + ".out")
         nlogger = None
